@@ -2,8 +2,8 @@
   description = "tables";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
-    rust-overlay.url = "github:oxalica/rust-overlay";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
+    rust-overlay.url = "github:oxalica/rust-overlay/stable";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
@@ -42,23 +42,16 @@
                 just
                 rustAnalyzer
                 rustToolchain
-                xorg.libxcb
-                libxkbcommon
-                wayland
-                wayland-protocols
-                vulkan-loader
-                mesa
+                fontconfig
+                vulkan-headers
               ];
 
               LD_LIBRARY_PATH = lib.makeLibraryPath [
-                mesa
                 wayland
                 libxkbcommon
                 xorg.libxcb
                 vulkan-loader
               ];
-
-              VK_ICD_FILENAMES = "${mesa}/share/vulkan/icd.d/radeon_icd.x86_64.json";
             };
         };
 
