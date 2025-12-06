@@ -1,0 +1,16 @@
+[package]
+name = "tables"
+version = "1.0.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+inf = { git = "https://github.com/VITObelgium/infra-rs" }
+geo = { git = "https://github.com/VITObelgium/infra-rs", default-features = false, features = [
+  "vector-io-csv",
+  "vector-io-xlsx",
+] }
+gpui = "0.2"
+gpui-component = "0.5.0-preview2"
+anyhow = "1"
+log = "0.4.29"
