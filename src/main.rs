@@ -2,7 +2,7 @@ use geo::vector::dataframe::Field;
 use gpui::{App, IntoElement, Window};
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::table::Table;
-use gpui_component::{Root, v_flex};
+use gpui_component::*;
 use std::path::PathBuf;
 
 use gpui::*;
@@ -90,7 +90,7 @@ impl TableView {
                     .flex()
                     .flex_1()
                     .size_full()
-                    .child(Table::new(layer).stripe(false))
+                    .child(Table::new(layer).stripe(true).xsmall())
             },
         )
     }
@@ -98,6 +98,16 @@ impl TableView {
 
 impl Render for TableView {
     fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        if self.layers.is_empty() {
+            return div().grid().size_full().content_center().child(
+                div()
+                    .font_bold()
+                    .text_center()
+                    .child("No data loaded")
+                    .child("Press Ctrl+o to open a file"),
+            );
+        }
+
         let mut tab_bar = TabBar::new("layers")
             .selected_index(self.active_tab)
             .on_click(cx.listener(|view, index, _, cx| {
@@ -137,6 +147,18 @@ fn main() {
 
     app.run(move |cx| {
         gpui_component::init(cx);
+
+        let theme_name = SharedString::from("Everforest Dark");
+        let themes_dir = std::env::var("CARGO_MANIFEST_DIR")
+            .map(|dir| PathBuf::from(dir).join("themes"))
+            .unwrap_or_else(|_| PathBuf::from("./themes"));
+        if let Err(err) = ThemeRegistry::watch_dir(themes_dir, cx, move |cx| {
+            if let Some(theme) = ThemeRegistry::global(cx).themes().get(&theme_name).cloned() {
+                Theme::global_mut(cx).apply_config(&theme);
+            }
+        }) {
+            log::error!("Failed to watch themes directory: {}", err);
+        }
 
         cx.spawn(async move |cx| {
             cx.open_window(WindowOptions::default(), |window, cx| {

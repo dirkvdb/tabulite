@@ -44,6 +44,8 @@
                 rustToolchain
                 fontconfig
                 vulkan-headers
+                libxkbcommon
+                xorg.libxcb
               ];
 
               LD_LIBRARY_PATH = lib.makeLibraryPath [
