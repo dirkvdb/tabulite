@@ -1,0 +1,11 @@
+# Tabulite Configuration File
+# This is an example configuration file for Tabulite.
+
+# Theme to use for the application
+# Available themes depend on the themes installed in your themes directory
+theme = "Default Dark"
+
+# Example of other theme options:
+# theme = "Default Light"
+# theme = "Everforest Dark"
+# theme = "Everforest Light"

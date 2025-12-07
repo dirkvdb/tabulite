@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use gpui::*;
 use gpui_component::table::{Column, TableDelegate, TableState};
 
+mod appconfig;
 mod tableio;
 
 #[derive(Clone)]
@@ -141,14 +142,17 @@ fn main() {
     #[command(author, version, about, long_about = None)]
     struct Args {
         input_file: Option<std::path::PathBuf>,
+        #[arg(short = 'c', long = "config")]
+        config_file: Option<std::path::PathBuf>,
     }
 
     let args = Args::parse();
+    let config = appconfig::load_config(args.config_file.as_deref());
 
     app.run(move |cx| {
         gpui_component::init(cx);
 
-        let theme_name = SharedString::from("Everforest Dark");
+        let theme_name = SharedString::from(config.theme);
         let themes_dir = std::env::var("CARGO_MANIFEST_DIR")
             .map(|dir| PathBuf::from(dir).join("themes"))
             .unwrap_or_else(|_| PathBuf::from("./themes"));
