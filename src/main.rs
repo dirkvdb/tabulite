@@ -2,6 +2,7 @@ use gpui_component::*;
 use std::path::PathBuf;
 use crate::tableview::TableView;
 use gpui::*;
+use gpui_component_assets::Assets;
 
 mod appconfig;
 mod tableio;
@@ -9,7 +10,7 @@ mod tablelayer;
 mod tableview;
 
 fn main() {
-    let app = Application::new();
+    let app = Application::new().with_assets(Assets);
 
     use clap::Parser;
 

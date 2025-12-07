@@ -61,6 +61,7 @@ impl TableView {
 
             let _ = this.update(cx, |this, cx| {
                 this.table.update(cx, |table, cx| {
+                    table.sortable = true;
                     table.delegate_mut().update_data(layer_data);
                     table.refresh(cx);
                 });

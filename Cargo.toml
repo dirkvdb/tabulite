@@ -13,12 +13,13 @@ geo = { git = "https://github.com/VITObelgium/infra-rs", default-features = fals
 ] }
 gpui = "0.2"
 gpui-component = "0.5.0-preview2"
+gpui-component-assets = "0.5.0-preview2"
 anyhow = "1"
 log = "0.4.29"
 toml = "0.9"
 serde = { version = "1.0", features = ["derive"] }
 dirs = "6"
-polars = "0.51"
+polars = { version = "0.51", features = ["lazy"] }
 
 [dev-dependencies]
 serial_test = "3.2"
