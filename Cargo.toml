@@ -9,6 +9,7 @@ inf = { git = "https://github.com/VITObelgium/infra-rs" }
 geo = { git = "https://github.com/VITObelgium/infra-rs", default-features = false, features = [
   "vector-io-csv",
   "vector-io-xlsx",
+  "polars",
 ] }
 gpui = "0.2"
 gpui-component = "0.5.0-preview2"
@@ -17,6 +18,7 @@ log = "0.4.29"
 toml = "0.9"
 serde = { version = "1.0", features = ["derive"] }
 dirs = "6"
+polars = "0.51"
 
 [dev-dependencies]
 serial_test = "3.2"
