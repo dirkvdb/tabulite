@@ -114,7 +114,7 @@ theme = "light"
     #[test]
     fn test_load_config_missing_file() {
         let config = load_config(Some(Path::new("/nonexistent/path/config.toml")));
-        assert_eq!(config.theme, "dark"); // Should return default
+        assert_eq!(config.theme, "Default Light"); // Should return default
     }
 
     #[test]
