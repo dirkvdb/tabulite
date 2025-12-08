@@ -1,12 +1,12 @@
 use gpui::{App, IntoElement, Window};
 use polars::{
     frame::DataFrame,
-    prelude::{AnyValue, IntoLazy, PlSmallStr},
+    prelude::{AnyValue, IntoLazy, PlSmallStr, col, lit},
 };
 
 use gpui::*;
 use gpui_component::{
-    Icon, IconName, Sizable, StyledExt,
+    Icon, IconName, Sizable, StyledExt, ActiveTheme,
     input::{Input, InputEvent, InputState},
     table::{Column, ColumnSort, TableDelegate, TableState},
 };
@@ -14,14 +14,18 @@ use gpui_component::{
 #[derive(Default)]
 pub struct TableLayer {
     data: polars::frame::DataFrame,
+    original_data: polars::frame::DataFrame,
     filter_enabled: bool,
     filter_inputs: Vec<Entity<InputState>>,
     input_subscriptions: Vec<Subscription>,
     columns: Vec<Column>,
 }
 
+const NULL: &'static str = "NULL";
+
 impl TableLayer {
     pub fn update_data(&mut self, data: polars::frame::DataFrame) {
+        self.original_data = data.clone();
         self.data = data;
         self.create_column_info();
     }
@@ -30,28 +34,82 @@ impl TableLayer {
         self.filter_enabled = !self.filter_enabled;
     }
 
+    fn filter_data(&mut self, cx: &mut Context<TableState<Self>>) {
+        // Collect filter texts with column names
+        let filters: Vec<(String, String)> = self
+            .filter_inputs
+            .iter()
+            .enumerate()
+            .filter_map(|(col_ix, input)| {
+                let filter_text = input.read(cx).value().to_string();
+                if !filter_text.is_empty() {
+                    let col_name = self
+                        .columns
+                        .get(col_ix)
+                        .map(|col| col.key.to_string())
+                        .unwrap_or_default();
+                    Some((col_name, filter_text))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if filters.is_empty() {
+            self.data = self.original_data.clone();
+            return;
+        }
+
+        // Clone the data to move into background task
+        let data = self.original_data.clone();
+
+        // Spawn background task to perform filtering
+        cx.spawn(async move |table_state, cx| {
+            let filtered_data = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut lazy_df = data.lazy();
+
+                    // Apply each filter using polars lazy API
+                    for (col_name, filter_text) in filters {
+                        // Create filter expression: cast to string, convert to lowercase, check if contains filter text
+                        let filter_expr = col(&col_name)
+                            .cast(polars::prelude::DataType::String)
+                            .str()
+                            .to_lowercase()
+                            .str()
+                            .contains(lit(filter_text.to_lowercase()), true /* literal, use false for regex support*/);
+
+                        lazy_df = lazy_df.filter(filter_expr);
+                    }
+
+                    lazy_df.collect().ok()
+                })
+                .await;
+
+            // Update the data on the UI thread
+            if let Some(filtered) = filtered_data {
+                let _ = table_state
+                    .update(cx, |table_state, cx| {
+                        table_state.delegate_mut().data = filtered;
+                        cx.notify();
+                    });
+            }
+        })
+        .detach();
+    }
+
     fn on_filter_input_event(
         &mut self,
-        state: &Entity<InputState>,
+        _state: &Entity<InputState>,
         event: &InputEvent,
         cx: &mut Context<TableState<Self>>,
     ) {
         match event {
             InputEvent::Change => {
-                let text = state.read(cx).value();
-                println!("Change: {}", text)
-                // if state == &self.input2 {
-                //     println!("Set disabled value: {}", text);
-                //     self.disabled_input.update(cx, |this, cx| {
-                //         this.set_value(text, window, cx);
-                //     })
-                // } else {
-                //     println!("Change: {}", text)
-                // }
-            }
-            InputEvent::PressEnter { secondary } => println!("PressEnter secondary: {}", secondary),
-            InputEvent::Focus => println!("Focus"),
-            InputEvent::Blur => println!("Blur"),
+                self.filter_data(cx);
+            },
+            _ => {}
         };
     }
 
@@ -148,12 +206,16 @@ impl TableDelegate for TableLayer {
         row_ix: usize,
         col_ix: usize,
         _: &mut Window,
-        _: &mut gpui::Context<'_, TableState<Self>>,
+        cx: &mut gpui::Context<'_, TableState<Self>>,
     ) -> impl IntoElement {
         match self.data[col_ix].get(row_ix) {
-            Ok(AnyValue::String(str)) => str.into(),
-            Ok(val) => val.to_string(),
-            Err(_) => "ERR".into(),
+            Ok(AnyValue::String(str)) => div().child(SharedString::new(str)),
+            Ok(AnyValue::StringOwned(str)) => div().child(SharedString::new(str.as_str())),
+            Ok(AnyValue::Null) => div().child(NULL).text_color(cx.theme().accent),
+            Ok(val) =>
+                div().child(SharedString::new(val.to_string()))
+            ,
+            Err(_) => div().child(SharedString::new("ERR")),
         }
     }
 
