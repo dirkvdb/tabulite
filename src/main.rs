@@ -1,13 +1,8 @@
-use gpui_component::*;
-use std::path::PathBuf;
-use crate::tableview::TableView;
 use gpui::*;
+use gpui_component::*;
 use gpui_component_assets::Assets;
-
-mod appconfig;
-mod tableio;
-mod tablelayer;
-mod tableview;
+use std::path::PathBuf;
+use tabulite::{appconfig, tabulite::Tabulite};
 
 fn main() {
     let app = Application::new().with_assets(Assets);
@@ -26,7 +21,7 @@ fn main() {
     let config = appconfig::load_config(args.config_file.as_deref());
 
     app.run(move |cx| {
-        gpui_component::init(cx);
+        tabulite::init(cx);
 
         let theme_name = SharedString::from(config.theme);
         let themes_dir = std::env::var("CARGO_MANIFEST_DIR")
@@ -42,10 +37,8 @@ fn main() {
 
         cx.spawn(async move |cx| {
             cx.open_window(WindowOptions::default(), |window, cx| {
-                let table = TableView::view(args.input_file, window, cx);
-
-                // This first level on the window, should be a Root.
-                cx.new(|cx| Root::new(table, window, cx))
+                let app = Tabulite::view(args.input_file, window, cx);
+                cx.new(|cx| Root::new(app, window, cx))
             })?;
 
             Ok::<_, anyhow::Error>(())

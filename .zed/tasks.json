@@ -1,0 +1,38 @@
+[
+  {
+    "label": "Cargo build",
+    "command": "cargo",
+    "args": ["build"],
+    // Env overrides for the command, will be appended to the terminal's environment from the settings.
+    // "env": { "foo": "bar" },
+    // Current working directory to spawn the command into, defaults to current project root.
+    //"cwd": "/path/to/working/directory",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "Cargo test",
+    "command": "cargo",
+    "args": ["test"],
+    // Env overrides for the command, will be appended to the terminal's environment from the settings.
+    // "env": { "foo": "bar" },
+    // Current working directory to spawn the command into, defaults to current project root.
+    //"cwd": "/path/to/working/directory",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "Run project",
+    "command": "cargo",
+    "args": [
+      "run",
+      "--release",
+      "/work/waterbodemverkenner-fcs/input/provincies/limburg/limburg2024.xlsx"
+    ],
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  }
+]

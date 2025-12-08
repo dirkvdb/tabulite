@@ -1,5 +1,6 @@
 use gpui::*;
 use gpui::{App, IntoElement, Window};
+use gpui_component::kbd::Kbd;
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::table::{Table, TableState};
 use gpui_component::*;
@@ -7,6 +8,7 @@ use std::path::PathBuf;
 
 use crate::tableio;
 use crate::tablelayer::TableLayer;
+use crate::tabulite::ToggleFilter;
 
 pub struct TableView {
     active_tab: usize,
@@ -51,6 +53,21 @@ impl TableView {
         }
     }
 
+    fn on_action_toggle_search(
+        &mut self,
+        _: &ToggleFilter,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.table.update(cx, |table, cx| {
+            table.sortable = true;
+            table.delegate_mut().toggle_filter();
+            table.refresh(cx);
+        });
+
+        cx.propagate();
+    }
+
     fn load_table_layer_task(
         path: PathBuf,
         layer: String,
@@ -86,12 +103,24 @@ impl TableView {
 impl Render for TableView {
     fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         if self.layer_names.is_empty() {
+            #[cfg(target_os = "macos")]
+            let shortcut_hint = "cmd+o";
+            #[cfg(not(target_os = "macos"))]
+            let shortcut_hint = "ctrl-o";
             return div().grid().size_full().content_center().child(
-                div()
+                v_flex()
                     .font_bold()
                     .text_center()
                     .child("No data loaded")
-                    .child("Press Ctrl+o to open a file"),
+                    .child(
+                        h_flex()
+                            .justify_center()
+                            .debug_pink()
+                            .gap_1()
+                            .child("Press ")
+                            .child(Kbd::new(Keystroke::parse(shortcut_hint).unwrap()))
+                            .child(" to open a file"),
+                    ),
             );
         }
 
@@ -118,5 +147,6 @@ impl Render for TableView {
                     .child(self.render_tab_content(window, cx)),
             )
             .child(tab_bar)
+            .on_action(cx.listener(Self::on_action_toggle_search))
     }
 }

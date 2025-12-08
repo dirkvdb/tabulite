@@ -12,8 +12,8 @@ geo = { git = "https://github.com/VITObelgium/infra-rs", default-features = fals
   "polars",
 ] }
 gpui = "0.2"
-gpui-component = "0.5.0-preview2"
-gpui-component-assets = "0.5.0-preview2"
+gpui-component = "0.5"
+gpui-component-assets = "0.5"
 anyhow = "1"
 log = "0.4.29"
 toml = "0.9"

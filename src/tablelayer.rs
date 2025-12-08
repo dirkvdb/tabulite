@@ -5,11 +5,16 @@ use polars::{
 };
 
 use gpui::*;
-use gpui_component::table::{Column, ColumnSort, TableDelegate, TableState};
+use gpui_component::{
+    Icon, IconName, Sizable, StyledExt,
+    input::{Input, InputState},
+    table::{Column, ColumnSort, TableDelegate, TableState},
+};
 
 #[derive(Clone, Default)]
 pub struct TableLayer {
     data: polars::frame::DataFrame,
+    filter_enabled: bool,
     columns: Vec<Column>,
 }
 
@@ -17,6 +22,10 @@ impl TableLayer {
     pub fn update_data(&mut self, data: polars::frame::DataFrame) {
         self.data = data;
         self.create_column_info();
+    }
+
+    pub fn toggle_filter(&mut self) {
+        self.filter_enabled = !self.filter_enabled;
     }
 
     fn create_column_info(&mut self) {
@@ -52,6 +61,43 @@ impl TableDelegate for TableLayer {
 
     fn column(&self, col_ix: usize, _: &App) -> &Column {
         &self.columns[col_ix]
+    }
+
+    fn render_header(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<TableState<Self>>,
+    ) -> Stateful<Div> {
+        let mut div = div().id("header");
+        if self.filter_enabled {
+            div = div.h_12()
+        }
+
+        div
+    }
+
+    fn render_th(
+        &mut self,
+        col_ix: usize,
+        window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let mut div = div()
+            .v_flex()
+            .size_full()
+            .child(self.column(col_ix, cx).name.clone());
+
+        if self.filter_enabled {
+            let input = cx.new(|cx| InputState::new(window, cx));
+            div = div.child(
+                Input::new(&input)
+                    .prefix(Icon::new(IconName::Search))
+                    .text_xs()
+                    .xsmall(),
+            );
+        }
+
+        div
     }
 
     fn render_td(
