@@ -70,7 +70,11 @@ impl TableView {
         cx: &mut gpui::Context<Self>,
     ) -> Task<()> {
         cx.spawn(async move |this, cx| {
-            let layer_data = tableio::layer_data(&path, &layer).unwrap_or_default();
+            // Move blocking I/O to a thread pool
+            let layer_data = cx
+                .background_executor()
+                .spawn(async move { tableio::layer_data(&path, &layer).unwrap_or_default() })
+                .await;
 
             let _ = this.update(cx, |this, cx| {
                 this.table.update(cx, |table, cx| {
