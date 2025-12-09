@@ -14,6 +14,9 @@ test_release test_name='':
 
 test: test_release
 
+run:
+    cargo run --release
+
 prod:
   cargo run --release -- --duco-ip=192.168.1.39 --duco-host duco_56dfcf.local --mqtt-addr=192.168.1.13 --mqtt-base-topic home/ventilation
 

@@ -7,6 +7,7 @@ use polars::{
 use gpui::*;
 use gpui_component::{
     Icon, IconName, Sizable, StyledExt, ActiveTheme,
+    tag::Tag,
     input::{Input, InputEvent, InputState},
     table::{Column, ColumnSort, TableDelegate, TableState},
 };
@@ -21,7 +22,7 @@ pub struct TableLayer {
     columns: Vec<Column>,
 }
 
-const NULL: &'static str = "NULL";
+const NULL: &'static str = "null";
 
 impl TableLayer {
     pub fn update_data(&mut self, data: polars::frame::DataFrame) {
@@ -211,7 +212,11 @@ impl TableDelegate for TableLayer {
         match self.data[col_ix].get(row_ix) {
             Ok(AnyValue::String(str)) => div().child(SharedString::new(str)),
             Ok(AnyValue::StringOwned(str)) => div().child(SharedString::new(str.as_str())),
-            Ok(AnyValue::Null) => div().child(NULL).text_color(cx.theme().accent),
+            Ok(AnyValue::Null) => div()
+                .flex()
+                .justify_center()
+                .child(Tag::secondary().outline().xsmall().child(NULL))
+                .text_color(cx.theme().accent),
             Ok(val) =>
                 div().child(SharedString::new(val.to_string()))
             ,
