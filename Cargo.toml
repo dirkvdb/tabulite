@@ -20,6 +20,7 @@ toml = "0.9"
 serde = { version = "1.0", features = ["derive"] }
 dirs = "6"
 polars = { version = "0.51", features = ["lazy", "regex", "strings"] }
+env_logger = "0.11"
 
 [dev-dependencies]
 serial_test = "3.2"

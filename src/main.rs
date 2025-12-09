@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use tabulite::{appconfig, tabulite::Tabulite};
 
 fn main() {
+    env_logger::init();
+
     let app = Application::new().with_assets(Assets);
 
     use clap::Parser;

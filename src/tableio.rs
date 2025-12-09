@@ -1,6 +1,6 @@
 use anyhow::Result;
 use gpui::SharedString;
-use std::path::{Path};
+use std::path::Path;
 
 use geo::vector::dataframe::{DataFrameOptions, HeaderRow, create_dataframe_reader};
 
@@ -10,6 +10,7 @@ pub fn layers_for_path(path: &Path) -> Result<Vec<SharedString>> {
 }
 
 pub fn layer_data(path: &Path, layer: &str) -> Result<polars::frame::DataFrame> {
+    log::debug!("Read table: {}", path.file_name().unwrap().display());
     let df = geo::vector::dataframe::polars::read_dataframe(
         path,
         &DataFrameOptions {
@@ -18,6 +19,7 @@ pub fn layer_data(path: &Path, layer: &str) -> Result<polars::frame::DataFrame> 
             ..Default::default()
         },
     )?;
+    log::debug!("Read table done");
 
     Ok(df)
 }
