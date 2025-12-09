@@ -15,7 +15,6 @@ pub struct TableView {
     data_path: Option<PathBuf>,
     layer_names: Vec<SharedString>,
     table: Entity<TableState<TableLayer>>,
-    _load_task: Task<()>,
 }
 
 impl TableView {
@@ -28,18 +27,16 @@ impl TableView {
 
         if let Some(path) = path {
             if let Ok(layer_names) = tableio::layers_for_path(&path) {
-                let task = if let Some(current_layer) = layer_names.first() {
+                if let Some(current_layer) = layer_names.first() {
                     Self::load_table_layer_task(path.clone(), current_layer.to_string(), cx)
-                } else {
-                    Task::ready(())
-                };
+                        .detach();
+                }
 
                 return Self {
                     active_tab: 0,
                     data_path: Some(path),
                     table,
                     layer_names,
-                    _load_task: task,
                 };
             }
         }
@@ -49,7 +46,6 @@ impl TableView {
             data_path: None,
             table,
             layer_names: Vec::default(),
-            _load_task: Task::ready(()),
         }
     }
 
@@ -116,10 +112,10 @@ impl Render for TableView {
                         h_flex()
                             .justify_center()
                             .debug_pink()
-                            .gap_1()
-                            .child("Press ")
+                            .gap_2()
+                            .child("Press")
                             .child(Kbd::new(Keystroke::parse(shortcut_hint).unwrap()))
-                            .child(" to open a file"),
+                            .child("to open a file"),
                     ),
             );
         }
@@ -130,7 +126,7 @@ impl Render for TableView {
                 view.active_tab = *index;
                 let path = view.data_path.clone().unwrap();
                 let layer_name = view.layer_names[*index].to_string();
-                view._load_task = Self::load_table_layer_task(path, layer_name, cx);
+                Self::load_table_layer_task(path, layer_name, cx).detach();
                 cx.notify();
             }));
 
