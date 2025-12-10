@@ -1,8 +1,6 @@
 use gpui::{App, KeyBinding};
 
-#[cfg(not(target_os = "macos"))]
 use crate::tabulite::Open;
-#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 use crate::tabulite::Quit;
 use crate::tabulite::ToggleFilter;
 
