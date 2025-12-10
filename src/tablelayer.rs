@@ -6,10 +6,10 @@ use polars::{
 
 use gpui::*;
 use gpui_component::{
-    Icon, IconName, Sizable, StyledExt, ActiveTheme,
-    tag::Tag,
+    ActiveTheme, Icon, IconName, Sizable, StyledExt,
     input::{Input, InputEvent, InputState},
     table::{Column, ColumnSort, TableDelegate, TableState},
+    tag::Tag,
 };
 
 #[derive(Default)]
@@ -79,7 +79,10 @@ impl TableLayer {
                             .str()
                             .to_lowercase()
                             .str()
-                            .contains(lit(filter_text.to_lowercase()), true /* literal, use false for regex support*/);
+                            .contains(
+                                lit(filter_text.to_lowercase()),
+                                true, /* literal, use false for regex support*/
+                            );
 
                         lazy_df = lazy_df.filter(filter_expr);
                     }
@@ -90,11 +93,10 @@ impl TableLayer {
 
             // Update the data on the UI thread
             if let Some(filtered) = filtered_data {
-                let _ = table_state
-                    .update(cx, |table_state, cx| {
-                        table_state.delegate_mut().data = filtered;
-                        cx.notify();
-                    });
+                let _ = table_state.update(cx, |table_state, cx| {
+                    table_state.delegate_mut().data = filtered;
+                    cx.notify();
+                });
             }
         })
         .detach();
@@ -109,7 +111,7 @@ impl TableLayer {
         match event {
             InputEvent::Change => {
                 self.filter_data(cx);
-            },
+            }
             _ => {}
         };
     }
@@ -217,9 +219,7 @@ impl TableDelegate for TableLayer {
                 .justify_center()
                 .child(Tag::secondary().outline().xsmall().child(NULL))
                 .text_color(cx.theme().accent),
-            Ok(val) =>
-                div().child(SharedString::new(val.to_string()))
-            ,
+            Ok(val) => div().child(SharedString::new(val.to_string())),
             Err(_) => div().child(SharedString::new("ERR")),
         }
     }
