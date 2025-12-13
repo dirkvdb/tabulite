@@ -4,11 +4,13 @@ use gpui_component::*;
 use std::path::PathBuf;
 
 use crate::tableview::TableView;
+use crate::titlebar::AppTitleBar;
 
 actions!(story, [Open, Quit, ToggleFilter,]);
 
 pub struct Tabulite {
     table: Entity<TableView>,
+    title_bar: Entity<AppTitleBar>,
 }
 
 impl Tabulite {
@@ -17,9 +19,10 @@ impl Tabulite {
     }
 
     fn new(path: Option<PathBuf>, window: &mut Window, cx: &mut gpui::Context<Self>) -> Self {
+        let title_bar = cx.new(|cx| AppTitleBar::new("tabulite", window, cx));
         let table = TableView::view(path, window, cx);
 
-        Self { table }
+        Self { table, title_bar }
     }
 }
 
@@ -30,6 +33,7 @@ impl Render for Tabulite {
         div()
             .v_flex()
             .size_full()
+            .child(self.title_bar.clone())
             .child(self.table.clone())
             .children(notification_layer)
     }

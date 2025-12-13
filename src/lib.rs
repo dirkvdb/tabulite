@@ -9,7 +9,9 @@ mod tableio;
 mod tablelayer;
 mod tableview;
 pub mod tabulite;
+mod titlebar;
 mod utils;
+mod appmenus;
 
 pub fn init(cx: &mut App) {
     gpui_component::init(cx);
