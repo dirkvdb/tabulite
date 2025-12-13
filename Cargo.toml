@@ -11,7 +11,7 @@ geo = { git = "https://github.com/VITObelgium/infra-rs", default-features = fals
   "vector-io-xlsx",
   "polars",
 ] }
-gpui = "0.2"
+gpui = { version = "0.2", features = ["macos-blade"] }
 gpui-component = "0.5"
 gpui-component-assets = "0.5"
 anyhow = "1"

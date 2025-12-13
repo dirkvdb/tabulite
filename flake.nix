@@ -42,18 +42,23 @@
                 just
                 rustAnalyzer
                 rustToolchain
+              ] ++ lib.optionals stdenv.isLinux [
                 fontconfig
                 vulkan-headers
                 libxkbcommon
                 xorg.libxcb
+              ] ++ lib.optionals stdenv.isDarwin [
+                apple-sdk_15
               ];
 
-              LD_LIBRARY_PATH = lib.makeLibraryPath [
-                wayland
-                libxkbcommon
-                xorg.libxcb
-                vulkan-loader
-              ];
+              LD_LIBRARY_PATH = lib.optionalString stdenv.isLinux (
+                lib.makeLibraryPath [
+                  wayland
+                  libxkbcommon
+                  xorg.libxcb
+                  vulkan-loader
+                ]
+              );
             };
         };
 
