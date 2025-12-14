@@ -46,6 +46,7 @@
                 vulkan-headers
                 libxkbcommon
                 xorg.libxcb
+                codex-acp
               ];
 
               LD_LIBRARY_PATH = lib.makeLibraryPath [
