@@ -47,14 +47,18 @@
                 libxkbcommon
                 xorg.libxcb
                 codex-acp
+              ] ++ lib.optionals stdenv.isDarwin [
+                apple-sdk_15
               ];
 
-              LD_LIBRARY_PATH = lib.makeLibraryPath [
-                wayland
-                libxkbcommon
-                xorg.libxcb
-                vulkan-loader
-              ];
+              LD_LIBRARY_PATH = lib.optionalString stdenv.isLinux (
+                lib.makeLibraryPath [
+                  wayland
+                  libxkbcommon
+                  xorg.libxcb
+                  vulkan-loader
+                ]
+              );
             };
         };
 
