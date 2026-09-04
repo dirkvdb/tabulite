@@ -27,12 +27,32 @@
             version = "1.0.0";
 
             src = ./.;
-            nativeBuildInputs = [ pkgs.pkg-config ];
+            nativeBuildInputs = [
+              pkgs.pkg-config
+              pkgs.makeWrapper
+            ];
             buildInputs = [
               pkgs.fontconfig
               pkgs.libxcb
               pkgs.libxkbcommon
+              pkgs.wayland
+              pkgs.vulkan-loader
             ];
+
+            postFixup = ''
+              wrapProgram $out/bin/tabulite \
+                --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath [
+                  pkgs.fontconfig
+                  pkgs.libxcb
+                  pkgs.libxkbcommon
+                  pkgs.wayland
+                  pkgs.vulkan-loader
+                ]}
+            '';
+
+            postInstall = ''
+              install -Dm644 tabulite.desktop $out/share/applications/tabulite.desktop
+            '';
 
             # assuming you have a Cargo.lock
             cargoLock = {
@@ -58,6 +78,10 @@
                   pkgs.libxcb
                   pkgs.libxkbcommon
                 ];
+
+                postInstall = ''
+                  install -Dm644 tabulite.desktop $out/share/applications/tabulite.desktop
+                '';
 
                 cargoLock = {
                   lockFile = ./Cargo.lock;
