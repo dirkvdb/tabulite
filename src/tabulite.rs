@@ -8,10 +8,16 @@ use crate::utils;
 actions!(
     story,
     [
+        ClearFilter,
+        DismissFilters,
         Open,
         Quit,
+        SelectFirstRow,
+        SelectLastRow,
         SelectNextColumn,
+        SelectNextRow,
         SelectPreviousColumn,
+        SelectPreviousRow,
         ToggleFilter,
     ]
 );
@@ -38,6 +44,30 @@ impl Tabulite {
         cx.on_action(move |_: &SelectNextColumn, cx| {
             let _ = weak_view.update(cx, |view, cx| {
                 view.table.update(cx, TableView::select_next_column);
+            });
+        });
+        let weak_view = view.downgrade();
+        cx.on_action(move |_: &SelectPreviousRow, cx| {
+            let _ = weak_view.update(cx, |view, cx| {
+                view.table.update(cx, TableView::select_previous_row);
+            });
+        });
+        let weak_view = view.downgrade();
+        cx.on_action(move |_: &SelectNextRow, cx| {
+            let _ = weak_view.update(cx, |view, cx| {
+                view.table.update(cx, TableView::select_next_row);
+            });
+        });
+        let weak_view = view.downgrade();
+        cx.on_action(move |_: &SelectFirstRow, cx| {
+            let _ = weak_view.update(cx, |view, cx| {
+                view.table.update(cx, TableView::select_first_row);
+            });
+        });
+        let weak_view = view.downgrade();
+        cx.on_action(move |_: &SelectLastRow, cx| {
+            let _ = weak_view.update(cx, |view, cx| {
+                view.table.update(cx, TableView::select_last_row);
             });
         });
         view

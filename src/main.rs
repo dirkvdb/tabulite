@@ -6,7 +6,7 @@ use tabulite::{appconfig, tabulite::Tabulite};
 fn main() {
     env_logger::init();
 
-    let app = gpui_kit::application();
+    let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
 
     use clap::Parser;
 
