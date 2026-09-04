@@ -1,7 +1,9 @@
-use gpui::{App, KeyBinding};
+use gpui_kit::{App, KeyBinding};
 
 use crate::tabulite::Open;
 use crate::tabulite::Quit;
+use crate::tabulite::SelectNextColumn;
+use crate::tabulite::SelectPreviousColumn;
 use crate::tabulite::ToggleFilter;
 
 pub mod appconfig;
@@ -12,10 +14,12 @@ pub mod tabulite;
 mod utils;
 
 pub fn init(cx: &mut App) {
-    gpui_component::init(cx);
+    gpui_kit::init(cx);
 
     cx.bind_keys([
-        KeyBinding::new("/", ToggleFilter, None),
+        KeyBinding::new("h", SelectPreviousColumn, Some("DataTable && !Input")),
+        KeyBinding::new("l", SelectNextColumn, Some("DataTable && !Input")),
+        KeyBinding::new("/", ToggleFilter, Some("DataTable && !Input")),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-o", Open, None),
         #[cfg(not(target_os = "macos"))]

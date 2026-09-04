@@ -1,10 +1,9 @@
-use gpui::*;
-use gpui::{App, IntoElement, Window};
-use gpui_component::kbd::Kbd;
-use gpui_component::notification::Notification;
-use gpui_component::tab::{Tab, TabBar};
-use gpui_component::table::{Table, TableState};
-use gpui_component::*;
+use gpui_kit::component::kbd::Kbd;
+use gpui_kit::component::notification::Notification;
+use gpui_kit::component::tab::{Tab, TabBar};
+use gpui_kit::component::table::{DataTable, TableState};
+use gpui_kit::component::*;
+use gpui_kit::*;
 use std::path::PathBuf;
 
 use crate::tablelayer::TableLayer;
@@ -23,8 +22,12 @@ impl TableView {
         cx.new(|cx| Self::new(path, window, cx))
     }
 
-    fn new(path: Option<PathBuf>, window: &mut Window, cx: &mut gpui::Context<Self>) -> Self {
+    fn new(path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let table = cx.new(|cx| TableState::new(TableLayer::default(), window, cx));
+        table.update(cx, |table, cx| {
+            let focus_handle = table.focus_handle(cx);
+            table.delegate_mut().set_table_focus_handle(focus_handle);
+        });
 
         if let Some(path) = path {
             Self::load_table(path, cx).detach();
@@ -38,22 +41,48 @@ impl TableView {
         }
     }
 
-    fn on_action_toggle_search(
-        &mut self,
-        _: &ToggleFilter,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn select_previous_column(&mut self, cx: &mut Context<Self>) {
         self.table.update(cx, |table, cx| {
-            table.sortable = true;
-            table.delegate_mut().toggle_filter();
-            table.refresh(cx);
-        });
+            let columns_count = table.delegate().columns_count();
+            if columns_count == 0 {
+                return;
+            }
 
-        cx.propagate();
+            let selected = table.selected_col().unwrap_or(0);
+            table.set_selected_col(selected.checked_sub(1).unwrap_or(columns_count - 1), cx);
+        });
     }
 
-    fn load_table(path: PathBuf, cx: &mut gpui::Context<Self>) -> Task<()> {
+    pub(crate) fn select_next_column(&mut self, cx: &mut Context<Self>) {
+        self.table.update(cx, |table, cx| {
+            let columns_count = table.delegate().columns_count();
+            if columns_count == 0 {
+                return;
+            }
+
+            let selected = table.selected_col().unwrap_or(0);
+            table.set_selected_col((selected + 1) % columns_count, cx);
+        });
+    }
+
+    pub(crate) fn focus_selected_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.table.update(cx, |table, cx| {
+            let Some(col_ix) = table.selected_col() else {
+                return;
+            };
+
+            let input = table.delegate_mut().filter_input(col_ix, window, cx);
+            table.refresh(cx);
+            cx.notify();
+            input.update(cx, |input, cx| input.focus(window, cx));
+        });
+    }
+
+    fn on_action_filter(&mut self, _: &ToggleFilter, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_selected_filter(window, cx);
+    }
+
+    pub(crate) fn load_table(path: PathBuf, cx: &mut Context<Self>) -> Task<()> {
         cx.spawn(async move |this, cx| {
             let path_clone = path.clone();
             let layers: Result<_> = cx
@@ -83,7 +112,7 @@ impl TableView {
         })
     }
 
-    fn load_table_layer(path: PathBuf, layer: String, cx: &mut gpui::Context<Self>) -> Task<()> {
+    fn load_table_layer(path: PathBuf, layer: String, cx: &mut Context<Self>) -> Task<()> {
         cx.spawn(async move |this, cx| {
             // Move blocking I/O to a thread pool
             let layer_data = cx
@@ -92,13 +121,17 @@ impl TableView {
                 .await;
             match layer_data {
                 Ok(data) => {
-                    let _ = this.update(cx, |this, cx| {
+                    let _ = this.update_in(cx, |this, window, cx| {
                         this.table.update(cx, |table, cx| {
                             table.sortable = true;
                             table.delegate_mut().update_data(data);
                             table.refresh(cx);
+                            if table.delegate().columns_count() > 0 {
+                                table.set_selected_col(0, cx);
+                            }
                             cx.notify();
                         });
+                        this.table.focus_handle(cx).focus(window, cx);
                     });
                 }
                 Err(err) => {
@@ -118,21 +151,18 @@ impl TableView {
         })
     }
 
-    fn render_tab_content(
-        &self,
-        _window: &mut Window,
-        _cx: &mut gpui::Context<Self>,
-    ) -> impl IntoElement {
+    fn render_tab_content(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_1()
             .size_full()
-            .child(Table::new(&self.table).stripe(true).xsmall())
+            .child(DataTable::new(&self.table).stripe(true).xsmall())
+            .on_action(cx.listener(Self::on_action_filter))
     }
 }
 
 impl Render for TableView {
-    fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.layer_names.is_empty() {
             #[cfg(target_os = "macos")]
             let shortcut_hint = "cmd+o";
@@ -178,6 +208,5 @@ impl Render for TableView {
                     .child(self.render_tab_content(window, cx)),
             )
             .child(tab_bar)
-            .on_action(cx.listener(Self::on_action_toggle_search))
     }
 }

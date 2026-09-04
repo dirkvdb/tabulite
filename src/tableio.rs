@@ -1,5 +1,5 @@
 use anyhow::Result;
-use gpui::SharedString;
+use gpui_kit::SharedString;
 use std::path::Path;
 
 use geo::vector::dataframe::{DataFrameOptions, HeaderRow, create_dataframe_reader};

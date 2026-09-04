@@ -1,13 +1,12 @@
-use gpui::*;
-use gpui_component::*;
-use gpui_component_assets::Assets;
+use gpui_kit::component::*;
+use gpui_kit::*;
 use std::path::PathBuf;
 use tabulite::{appconfig, tabulite::Tabulite};
 
 fn main() {
     env_logger::init();
 
-    let app = Application::new().with_assets(Assets);
+    let app = gpui_kit::application();
 
     use clap::Parser;
 

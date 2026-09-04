@@ -1,6 +1,6 @@
 use anyhow::Error;
-use gpui::{AppContext as _, AsyncApp, SharedString};
-use gpui_component::{WindowExt as _, notification::Notification};
+use gpui_kit::component::{WindowExt as _, notification::Notification};
+use gpui_kit::{AppContext as _, AsyncApp, SharedString};
 
 pub fn error_message(context: &str, err: Error) -> SharedString {
     let err_msg = if let Some(io_err) = err

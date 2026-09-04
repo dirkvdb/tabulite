@@ -1,16 +1,15 @@
-use gpui::{App, IntoElement, Window};
 use polars::{
     frame::DataFrame,
     prelude::{AnyValue, IntoLazy, PlSmallStr, col, lit},
 };
 
-use gpui::*;
-use gpui_component::{
-    ActiveTheme, Icon, IconName, Sizable, StyledExt,
-    input::{Input, InputEvent, InputState},
-    table::{Column, ColumnSort, TableDelegate, TableState},
+use gpui_kit::component::{
+    ActiveTheme, Icon, IconName, Sizable,
+    input::{Escape, Input, InputEvent, InputState},
+    table::{Column, ColumnGroup, ColumnSort, TableDelegate, TableState},
     tag::Tag,
 };
+use gpui_kit::*;
 
 #[derive(Default)]
 pub struct TableLayer {
@@ -20,6 +19,7 @@ pub struct TableLayer {
     filter_inputs: Vec<Entity<InputState>>,
     input_subscriptions: Vec<Subscription>,
     columns: Vec<Column>,
+    table_focus_handle: Option<FocusHandle>,
 }
 
 const NULL: &'static str = "null";
@@ -31,8 +31,41 @@ impl TableLayer {
         self.create_column_info();
     }
 
-    pub fn toggle_filter(&mut self) {
-        self.filter_enabled = !self.filter_enabled;
+    pub fn columns_count(&self) -> usize {
+        self.columns.len()
+    }
+
+    pub fn set_table_focus_handle(&mut self, focus_handle: FocusHandle) {
+        self.table_focus_handle = Some(focus_handle);
+    }
+
+    pub fn filter_input(
+        &mut self,
+        col_ix: usize,
+        window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> Entity<InputState> {
+        self.filter_enabled = true;
+        self.ensure_filter_inputs(window, cx);
+        self.filter_inputs[col_ix].clone()
+    }
+
+    fn ensure_filter_inputs(&mut self, window: &mut Window, cx: &mut Context<TableState<Self>>) {
+        if !self.filter_inputs.is_empty() {
+            return;
+        }
+
+        for _ in 0..self.columns.len() {
+            let input = cx.new(|cx| InputState::new(window, cx));
+            self.input_subscriptions.push(cx.subscribe(
+                &input,
+                |this, entity, event: &InputEvent, cx| {
+                    this.delegate_mut()
+                        .on_filter_input_event(&entity, event, cx);
+                },
+            ));
+            self.filter_inputs.push(input);
+        }
     }
 
     fn filter_data(&mut self, cx: &mut Context<TableState<Self>>) {
@@ -150,8 +183,8 @@ impl TableDelegate for TableLayer {
         self.data.shape().0
     }
 
-    fn column(&self, col_ix: usize, _: &App) -> &Column {
-        &self.columns[col_ix]
+    fn column(&self, col_ix: usize, _: &App) -> Column {
+        self.columns[col_ix].clone()
     }
 
     fn render_header(
@@ -159,26 +192,23 @@ impl TableDelegate for TableLayer {
         window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> Stateful<Div> {
-        let mut div = div().id("header");
+        let div = div().id("header");
         if self.filter_enabled {
-            if self.filter_inputs.is_empty() {
-                for _ in 0..self.columns.len() {
-                    let input = cx.new(|cx| InputState::new(window, cx).clean_on_escape());
-                    self.input_subscriptions.push(cx.subscribe(
-                        &input,
-                        |this, entity, event: &InputEvent, cx| {
-                            this.delegate_mut()
-                                .on_filter_input_event(&entity, event, cx);
-                        },
-                    ));
-                    self.filter_inputs.push(input);
-                }
-            }
-
-            div = div.h_12()
+            self.ensure_filter_inputs(window, cx);
         }
 
         div
+    }
+
+    fn group_headers(&self, _: &App) -> Option<Vec<Vec<ColumnGroup>>> {
+        self.filter_enabled.then(|| {
+            vec![
+                self.columns
+                    .iter()
+                    .map(|column| ColumnGroup::new(column.name.clone(), 1))
+                    .collect(),
+            ]
+        })
     }
 
     fn render_th(
@@ -187,21 +217,28 @@ impl TableDelegate for TableLayer {
         _window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        let mut div = div()
-            .v_flex()
-            .size_full()
-            .child(self.column(col_ix, cx).name.clone());
-
         if self.filter_enabled {
-            div = div.child(
-                Input::new(&self.filter_inputs.get(col_ix).expect("BUG: column index"))
-                    .prefix(Icon::new(IconName::Search))
-                    .text_xs()
-                    .xsmall(),
-            );
+            let table_focus_handle = self.table_focus_handle.clone();
+            div()
+                .size_full()
+                .child(
+                    Input::new(&self.filter_inputs.get(col_ix).expect("BUG: column index"))
+                        .prefix(Icon::new(IconName::Search))
+                        .text_xs()
+                        .xsmall(),
+                )
+                .on_action(move |_: &Escape, window, cx| {
+                    if let Some(focus_handle) = &table_focus_handle {
+                        focus_handle.focus(window, cx);
+                    } else {
+                        window.blur(cx);
+                    }
+                })
+        } else {
+            div()
+                .size_full()
+                .child(self.column(col_ix, cx).name.clone())
         }
-
-        div
     }
 
     fn render_td(
@@ -209,7 +246,7 @@ impl TableDelegate for TableLayer {
         row_ix: usize,
         col_ix: usize,
         _: &mut Window,
-        cx: &mut gpui::Context<'_, TableState<Self>>,
+        cx: &mut Context<'_, TableState<Self>>,
     ) -> impl IntoElement {
         match self.data[col_ix].get(row_ix) {
             Ok(AnyValue::String(str)) => div().child(SharedString::new(str)),

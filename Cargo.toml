@@ -11,15 +11,13 @@ geo = { git = "https://github.com/VITObelgium/infra-rs", default-features = fals
   "vector-io-xlsx",
   "polars",
 ] }
-gpui = { version = "0.2", features = ["macos-blade"] }
-gpui-component = "0.5"
-gpui-component-assets = "0.5"
+gpui-kit = "0.6"
 anyhow = "1"
 log = "0.4.29"
 toml = "0.9"
 serde = { version = "1.0", features = ["derive"] }
 dirs = "6"
-polars = { version = "0.51", features = ["lazy", "regex", "strings"] }
+polars = { version = "0.55", features = ["lazy", "regex", "strings"] }
 env_logger = "0.11"
 
 [dev-dependencies]
