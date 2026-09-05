@@ -2,6 +2,7 @@
 Name=Tabulite
 Comment=View and filter tabular data
 Exec=tabulite %F
+Icon=tabulite
 Terminal=false
 Type=Application
 Categories=Office;Spreadsheet;

@@ -41,17 +41,20 @@
 
             postFixup = ''
               wrapProgram $out/bin/tabulite \
-                --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath [
-                  pkgs.fontconfig
-                  pkgs.libxcb
-                  pkgs.libxkbcommon
-                  pkgs.wayland
-                  pkgs.vulkan-loader
-                ]}
+                --prefix LD_LIBRARY_PATH : ${
+                  pkgs.lib.makeLibraryPath [
+                    pkgs.fontconfig
+                    pkgs.libxcb
+                    pkgs.libxkbcommon
+                    pkgs.wayland
+                    pkgs.vulkan-loader
+                  ]
+                }
             '';
 
             postInstall = ''
               install -Dm644 tabulite.desktop $out/share/applications/tabulite.desktop
+              install -Dm644 logo.svg $out/share/icons/hicolor/scalable/apps/tabulite.svg
             '';
 
             # assuming you have a Cargo.lock
@@ -81,6 +84,7 @@
 
                 postInstall = ''
                   install -Dm644 tabulite.desktop $out/share/applications/tabulite.desktop
+                  install -Dm644 logo.svg $out/share/icons/hicolor/scalable/apps/tabulite.svg
                 '';
 
                 cargoLock = {

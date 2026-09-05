@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Tabulite logo</title>
+  <desc id="desc">A minimal table grid whose highlighted cells form a letter T.</desc>
+
+  <rect x="32" y="32" width="448" height="448" rx="112" fill="#17211B"/>
+
+  <rect x="104" y="112" width="304" height="288" rx="32" fill="#F4F1E8"/>
+
+  <path d="
+    M104 144
+    Q104 112 136 112
+    H376
+    Q408 112 408 144
+    V184
+    H104
+    Z
+
+    M224 184
+    H288
+    V400
+    H224
+    Z
+  " fill="#7FB685"/>
+
+  <path d="M104 184H408 M104 256H408 M104 328H408
+           M176 184V400 M224 184V400 M288 184V400 M336 184V400"
+        fill="none"
+        stroke="#17211B"
+        stroke-width="16"
+        stroke-linecap="square"/>
+
+  <path d="M104 184H408" stroke="#17211B" stroke-width="16"/>
+</svg>
