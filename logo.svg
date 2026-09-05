@@ -1,33 +1,78 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
-  <title id="title">Tabulite logo</title>
-  <desc id="desc">A minimal table grid whose highlighted cells form a letter T.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#10251f"/>
+      <stop offset="100%" stop-color="#071711"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0d201a"/>
+      <stop offset="100%" stop-color="#081712"/>
+    </linearGradient>
+    <linearGradient id="green" x1="5%" y1="0%" x2="95%" y2="100%">
+      <stop offset="0%" stop-color="#91edb2"/>
+      <stop offset="55%" stop-color="#53dc90"/>
+      <stop offset="100%" stop-color="#26c879"/>
+    </linearGradient>
+    <linearGradient id="greenSide" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#a9f0bf"/>
+      <stop offset="100%" stop-color="#62d794"/>
+    </linearGradient>
+    <linearGradient id="cream" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fffdf8"/>
+      <stop offset="100%" stop-color="#eceae3"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.16"/>
+      <stop offset="44%" stop-color="#ffffff" stop-opacity="0.035"/>
+      <stop offset="45%" stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
 
-  <rect x="32" y="32" width="448" height="448" rx="112" fill="#17211B"/>
+  <rect width="1024" height="1024" rx="190" fill="url(#bg)"/>
 
-  <rect x="104" y="112" width="304" height="288" rx="32" fill="#F4F1E8"/>
+  <!-- Square spreadsheet surface -->
+  <rect x="132" y="132" width="760" height="760" rx="126" fill="url(#panel)"/>
+  <rect x="133" y="133" width="758" height="758" rx="125" fill="none" stroke="#25513f" stroke-opacity="0.48" stroke-width="2"/>
 
-  <path d="
-    M104 144
-    Q104 112 136 112
-    H376
-    Q408 112 408 144
-    V184
-    H104
-    Z
+  <!-- Grid: square 736 x 736 at (144,144), 20px gutters -->
+  <!-- Top-left selected header cell -->
+  <path d="M239 144 H352 Q376 144 376 168 V289 Q376 313 352 313 H168 Q144 313 144 289 V239 Q144 144 239 144 Z" fill="url(#greenSide)"/>
+  <!-- Top-center selected header cell -->
+  <rect x="396" y="144" width="232" height="169" rx="24" fill="url(#green)"/>
+  <!-- Top-right selected header cell -->
+  <path d="M672 144 H785 Q880 144 880 239 V289 Q880 313 856 313 H672 Q648 313 648 289 V168 Q648 144 672 144 Z" fill="url(#greenSide)"/>
 
-    M224 184
-    H288
-    V400
-    H224
-    Z
-  " fill="#7FB685"/>
+  <!-- Row 2 -->
+  <rect x="144" y="333" width="232" height="169" rx="24" fill="url(#cream)"/>
+  <rect x="396" y="333" width="232" height="169" rx="24" fill="url(#green)"/>
+  <rect x="648" y="333" width="232" height="169" rx="24" fill="url(#cream)"/>
 
-  <path d="M104 184H408 M104 256H408 M104 328H408
-           M176 184V400 M224 184V400 M288 184V400 M336 184V400"
-        fill="none"
-        stroke="#17211B"
-        stroke-width="16"
-        stroke-linecap="square"/>
+  <!-- Row 3 -->
+  <rect x="144" y="522" width="232" height="169" rx="24" fill="url(#cream)"/>
+  <rect x="396" y="522" width="232" height="169" rx="24" fill="url(#green)"/>
+  <rect x="648" y="522" width="232" height="169" rx="24" fill="url(#cream)"/>
 
-  <path d="M104 184H408" stroke="#17211B" stroke-width="16"/>
+  <!-- Bottom-left -->
+  <path d="M168 711 H352 Q376 711 376 735 V856 Q376 880 352 880 H239 Q144 880 144 785 V735 Q144 711 168 711 Z" fill="url(#cream)"/>
+  <!-- Bottom-center selected cell -->
+  <rect x="396" y="711" width="232" height="169" rx="24" fill="url(#green)"/>
+  <!-- Bottom-right -->
+  <path d="M672 711 H856 Q880 711 880 735 V785 Q880 880 785 880 H672 Q648 880 648 856 V735 Q648 711 672 711 Z" fill="url(#cream)"/>
+
+  <!-- subtle glassy polish, no glow or filters -->
+  <g fill="url(#sheen)" opacity="0.72">
+    <path d="M239 144 H352 Q376 144 376 168 V289 Q376 313 352 313 H168 Q144 313 144 289 V239 Q144 144 239 144 Z"/>
+    <rect x="396" y="144" width="232" height="169" rx="24"/>
+    <path d="M672 144 H785 Q880 144 880 239 V289 Q880 313 856 313 H672 Q648 313 648 289 V168 Q648 144 672 144 Z"/>
+    <rect x="144" y="333" width="232" height="169" rx="24"/>
+    <rect x="396" y="333" width="232" height="169" rx="24"/>
+    <rect x="648" y="333" width="232" height="169" rx="24"/>
+    <rect x="144" y="522" width="232" height="169" rx="24"/>
+    <rect x="396" y="522" width="232" height="169" rx="24"/>
+    <rect x="648" y="522" width="232" height="169" rx="24"/>
+    <path d="M168 711 H352 Q376 711 376 735 V856 Q376 880 352 880 H239 Q144 880 144 785 V735 Q144 711 168 711 Z"/>
+    <rect x="396" y="711" width="232" height="169" rx="24"/>
+    <path d="M672 711 H856 Q880 711 880 735 V785 Q880 880 785 880 H672 Q648 880 648 856 V735 Q648 711 672 711 Z"/>
+  </g>
 </svg>
