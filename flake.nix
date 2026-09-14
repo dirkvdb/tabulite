@@ -18,6 +18,13 @@
         pkgs = import nixpkgs {
           inherit system;
         };
+        linuxRuntimeDeps = with pkgs; [
+          fontconfig
+          libxcb
+          libxkbcommon
+          wayland
+          vulkan-loader
+        ];
       in
       {
         packages = {
@@ -31,25 +38,11 @@
               pkgs.pkg-config
               pkgs.makeWrapper
             ];
-            buildInputs = [
-              pkgs.fontconfig
-              pkgs.libxcb
-              pkgs.libxkbcommon
-              pkgs.wayland
-              pkgs.vulkan-loader
-            ];
+            buildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux linuxRuntimeDeps;
 
-            postFixup = ''
+            postFixup = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
               wrapProgram $out/bin/tabulite \
-                --prefix LD_LIBRARY_PATH : ${
-                  pkgs.lib.makeLibraryPath [
-                    pkgs.fontconfig
-                    pkgs.libxcb
-                    pkgs.libxkbcommon
-                    pkgs.wayland
-                    pkgs.vulkan-loader
-                  ]
-                }
+                --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath linuxRuntimeDeps}
             '';
 
             postInstall = ''
