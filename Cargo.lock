@@ -2567,8 +2567,8 @@ dependencies = [
 
 [[package]]
 name = "geo"
-version = "2026.9.2"
-source = "git+https://github.com/VITObelgium/infra-rs#4ef14f1223183fe15f4e5263ba467054d271d62a"
+version = "2026.9.14"
+source = "git+https://github.com/VITObelgium/infra-rs#00b1c48a812941d67122c8e766d353d142f9bca2"
 dependencies = [
  "approx",
  "bytemuck",
@@ -3967,8 +3967,8 @@ dependencies = [
 
 [[package]]
 name = "inf"
-version = "2026.9.2"
-source = "git+https://github.com/VITObelgium/infra-rs#4ef14f1223183fe15f4e5263ba467054d271d62a"
+version = "2026.9.14"
+source = "git+https://github.com/VITObelgium/infra-rs#00b1c48a812941d67122c8e766d353d142f9bca2"
 dependencies = [
  "approx",
  "bytemuck",
@@ -7835,8 +7835,8 @@ dependencies = [
 
 [[package]]
 name = "simd_macro"
-version = "2026.9.2"
-source = "git+https://github.com/VITObelgium/infra-rs#4ef14f1223183fe15f4e5263ba467054d271d62a"
+version = "2026.9.14"
+source = "git+https://github.com/VITObelgium/infra-rs#00b1c48a812941d67122c8e766d353d142f9bca2"
 dependencies = [
  "proc-macro2",
  "quote",

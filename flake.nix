@@ -54,7 +54,7 @@
             cargoLock = {
               lockFile = ./Cargo.lock;
               outputHashes = {
-                "geo-2026.9.2" = "sha256-mr0kUqgcLAKGg8T3tB0Jw9PSeE1MxADWij9CqQ+FE+g=";
+                "geo-2026.9.14" = "sha256-mr0kUqgcLAKGg8T3tB0Jw9PSeE1MxADWij9CqQ+FE+g=";
               };
             };
           };
