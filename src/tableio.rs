@@ -1,6 +1,9 @@
 use std::{
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use anyhow::{Context as _, Result, bail};
@@ -14,6 +17,7 @@ use crate::excel;
 pub struct TableData {
     connection: Arc<Mutex<Connection>>,
     pub columns: Vec<TableColumn>,
+    pub loading_mode: LoadingMode,
 }
 
 #[derive(Clone)]
@@ -37,6 +41,12 @@ pub struct TableRows {
     pub rows: Vec<Vec<Option<String>>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoadingMode {
+    Paged,
+    Eager,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum FileType {
     Csv,
@@ -47,6 +57,15 @@ enum FileType {
     Sqlite,
 }
 
+impl FileType {
+    fn loading_mode(self) -> LoadingMode {
+        match self {
+            Self::Xlsx => LoadingMode::Eager,
+            Self::Csv | Self::Tsv | Self::Parquet | Self::Json | Self::Sqlite => LoadingMode::Paged,
+        }
+    }
+}
+
 fn file_type(path: &Path) -> Result<FileType> {
     let extension = path
         .extension()
@@ -55,7 +74,7 @@ fn file_type(path: &Path) -> Result<FileType> {
         .to_ascii_lowercase();
     match extension.as_str() {
         "csv" => Ok(FileType::Csv),
-        "tsv" => Ok(FileType::Tsv),
+        "tsv" | "tab" => Ok(FileType::Tsv),
         "parquet" => Ok(FileType::Parquet),
         "json" | "jsonl" | "ndjson" => Ok(FileType::Json),
         "xlsx" => Ok(FileType::Xlsx),
@@ -66,6 +85,28 @@ fn file_type(path: &Path) -> Result<FileType> {
 
 fn quoted(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+fn sql_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+static NEXT_CONNECTION: AtomicU64 = AtomicU64::new(0);
+
+fn data_connection() -> Result<Connection> {
+    let conn = Connection::open_in_memory()?;
+    let temp = std::env::temp_dir().join(format!(
+        "tabulite-duckdb-{}-{}",
+        std::process::id(),
+        NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed)
+    ));
+    // Large sorted pages should use DuckDB's external sort rather than a TopN
+    // heap whose size grows with OFFSET. Spill files must not use the app's cwd.
+    conn.execute_batch(&format!(
+        "SET memory_limit = '512MiB'; SET temp_directory = {}; SET disabled_optimizers = 'top_n'",
+        sql_literal(&temp.to_string_lossy())
+    ))?;
+    Ok(conn)
 }
 
 pub fn layers_for_path(path: &Path) -> Result<Vec<SharedString>> {
@@ -103,53 +144,33 @@ fn attach_sqlite(conn: &Connection, path: &Path) -> Result<()> {
     conn.execute_batch("LOAD sqlite_scanner")
         .context("Cannot load SQLite support from DuckDB")?;
     // ATTACH cannot bind its filename; escape the local path as a SQL string.
-    let path = path.to_string_lossy().replace('\'', "''");
-    conn.execute_batch(&format!(
-        "ATTACH '{path}' AS source (TYPE sqlite, READ_ONLY)"
-    ))?;
+    let path = sql_literal(&path.to_string_lossy());
+    conn.execute_batch(&format!("ATTACH {path} AS source (TYPE sqlite, READ_ONLY)"))?;
     Ok(())
 }
 
 pub fn layer_data(path: &Path, layer: &str) -> Result<TableData> {
     log::debug!("Read table: {}", path.display());
-    let conn = Connection::open_in_memory()?;
-    match file_type(path)? {
-        FileType::Csv | FileType::Tsv => {
-            conn.execute(
-                "CREATE TABLE data AS SELECT * FROM read_csv(?)",
-                [path.to_string_lossy().as_ref()],
-            )?;
-        }
-        FileType::Parquet => {
-            conn.execute(
-                "CREATE TABLE data AS SELECT * FROM read_parquet(?)",
-                [path.to_string_lossy().as_ref()],
-            )?;
-        }
-        FileType::Json => {
-            conn.execute(
-                "CREATE TABLE data AS SELECT * FROM read_json_auto(?)",
-                [path.to_string_lossy().as_ref()],
-            )?;
-        }
+    let conn = data_connection()?;
+    let source_path = sql_literal(&path.to_string_lossy());
+    let file_type = file_type(path)?;
+    let source = match file_type {
+        FileType::Csv | FileType::Tsv => format!("read_csv({source_path})"),
+        FileType::Parquet => format!("read_parquet({source_path})"),
+        FileType::Json => format!("read_json_auto({source_path})"),
         FileType::Sqlite => {
             attach_sqlite(&conn, path)?;
-            conn.execute(
-                &format!(
-                    "CREATE TABLE data AS SELECT * FROM source.main.{}",
-                    quoted(layer)
-                ),
-                [],
-            )?;
+            format!("source.main.{}", quoted(layer))
         }
         FileType::Xlsx => {
             excel::load(&conn)?;
-            conn.execute(
-                "CREATE TABLE data AS SELECT * FROM read_xlsx(?, sheet = ?, header = true)",
-                [path.to_string_lossy().as_ref(), layer],
-            )?;
+            format!(
+                "read_xlsx({source_path}, sheet = {}, header = true)",
+                sql_literal(layer)
+            )
         }
-    }
+    };
+    conn.execute_batch(&format!("CREATE VIEW data AS SELECT * FROM {source}"))?;
 
     let columns = {
         let mut statement = conn.prepare("SELECT * FROM data LIMIT 0")?;
@@ -192,14 +213,63 @@ pub fn layer_data(path: &Path, layer: &str) -> Result<TableData> {
     Ok(TableData {
         connection: Arc::new(Mutex::new(conn)),
         columns,
+        loading_mode: file_type.loading_mode(),
     })
 }
 
 impl TableData {
-    pub fn query(
+    pub fn count(&self, filters: &[(usize, String)]) -> Result<usize> {
+        let where_clause = self.where_clause(filters);
+        let sql = format!("SELECT count(*) FROM data {where_clause}");
+        let conn = self.connection.lock().expect("DuckDB connection poisoned");
+        let count: i64 = conn.query_row(
+            &sql,
+            params_from_iter(filters.iter().map(|(_, value)| value)),
+            |row| row.get(0),
+        )?;
+        Ok(usize::try_from(count)?)
+    }
+
+    fn where_clause(&self, filters: &[(usize, String)]) -> String {
+        if filters.is_empty() {
+            return String::new();
+        }
+        let conditions = filters
+            .iter()
+            .map(|(ix, _)| {
+                format!(
+                    "contains(lower(CAST({} AS VARCHAR)), lower(?))",
+                    quoted(&self.columns[*ix].name)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        format!("WHERE {conditions}")
+    }
+
+    pub fn query_page(
         &self,
         filters: &[(usize, String)],
         sort: Option<(usize, bool)>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<TableRows> {
+        self.query_rows(filters, sort, Some((offset, limit)))
+    }
+
+    pub fn query_all(
+        &self,
+        filters: &[(usize, String)],
+        sort: Option<(usize, bool)>,
+    ) -> Result<TableRows> {
+        self.query_rows(filters, sort, None)
+    }
+
+    fn query_rows(
+        &self,
+        filters: &[(usize, String)],
+        sort: Option<(usize, bool)>,
+        page: Option<(usize, usize)>,
     ) -> Result<TableRows> {
         let select = self
             .columns
@@ -214,36 +284,50 @@ impl TableData {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        let where_clause = filters
-            .iter()
-            .map(|(ix, _)| {
-                format!(
-                    "contains(lower(CAST({} AS VARCHAR)), lower(?))",
-                    quoted(&self.columns[*ix].name)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" AND ");
+        let where_clause = self.where_clause(filters);
         let order = match sort {
-            Some((ix, descending)) => format!(
-                "{} {} NULLS LAST, rowid",
-                quoted(&self.columns[ix].name),
-                if descending { "DESC" } else { "ASC" }
-            ),
-            None => "rowid".to_string(),
-        };
-        let sql = format!(
-            "SELECT {select} FROM data {} ORDER BY {order}",
-            if where_clause.is_empty() {
-                String::new()
-            } else {
-                format!("WHERE {where_clause}")
+            Some((ix, descending)) => {
+                // Page boundaries must not depend on the execution order of equal sort keys.
+                // Rows with identical displayed values are interchangeable to the viewer.
+                let tie_breaker = self
+                    .columns
+                    .iter()
+                    .map(|column| {
+                        let name = quoted(&column.name);
+                        if column.kind == ColumnKind::Blob {
+                            format!("octet_length({name})")
+                        } else {
+                            name
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "ORDER BY {} {} NULLS LAST, hash(row({tie_breaker}))",
+                    quoted(&self.columns[ix].name),
+                    if descending { "DESC" } else { "ASC" }
+                )
             }
-        );
+            None => String::new(),
+        };
+        let paging = if page.is_some() {
+            "LIMIT ? OFFSET ?"
+        } else {
+            ""
+        };
+        let sql = format!("SELECT {select} FROM data {where_clause} {order} {paging}");
+        let limit = page.map(|(_, limit)| i64::try_from(limit)).transpose()?;
+        let offset = page.map(|(offset, _)| i64::try_from(offset)).transpose()?;
+        let mut params: Vec<&dyn duckdb::ToSql> = filters
+            .iter()
+            .map(|(_, value)| value as &dyn duckdb::ToSql)
+            .collect();
+        if let (Some(limit), Some(offset)) = (&limit, &offset) {
+            params.extend([limit as &dyn duckdb::ToSql, offset as &dyn duckdb::ToSql]);
+        }
         let conn = self.connection.lock().expect("DuckDB connection poisoned");
         let mut statement = conn.prepare(&sql)?;
-        let mut result =
-            statement.query(params_from_iter(filters.iter().map(|(_, value)| value)))?;
+        let mut result = statement.query(params_from_iter(params))?;
         let mut rows = Vec::new();
         while let Some(row) = result.next()? {
             let mut cells = Vec::with_capacity(self.columns.len());
@@ -356,7 +440,14 @@ mod tests {
             zip.start_file("xl/worksheets/sheet1.xml", options)?;
             zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:B3"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>name</t></is></c><c r="B1" t="inlineStr"><is><t>amount</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Alice</t></is></c><c r="B2"><v>10</v></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Bob</t></is></c><c r="B3"><v>2</v></c></row></sheetData></worksheet>"#)?;
             zip.start_file("xl/worksheets/sheet2.xml", options)?;
-            zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:A2"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>label</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>second</t></is></c></row></sheetData></worksheet>"#)?;
+            let mut sheet = String::from(
+                r#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:A151"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>label</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>second</t></is></c></row>"#,
+            );
+            for row in 3..=151 {
+                sheet.push_str(&format!("<row r=\"{row}\"><c r=\"A{row}\" t=\"inlineStr\"><is><t>row_{}</t></is></c></row>", row - 1));
+            }
+            sheet.push_str("</sheetData></worksheet>");
+            zip.write_all(sheet.as_bytes())?;
             zip.finish()?;
 
             let layers = layers_for_path(&path)?;
@@ -364,8 +455,21 @@ mod tests {
             let other = layer_data(&path, layers[1].as_ref())?;
             Ok((layers, sales, other))
         })();
-        std::fs::remove_file(&path).unwrap();
         let (layers, sales, other) = result.unwrap();
+        assert_eq!(sales.loading_mode, LoadingMode::Eager);
+        assert_eq!(sales.query_all(&[], None).unwrap().rows.len(), 2);
+        assert_eq!(
+            sales
+                .query_all(&[(0, "ali".into())], None)
+                .unwrap()
+                .rows
+                .len(),
+            1
+        );
+        assert_eq!(
+            sales.query_all(&[], Some((1, false))).unwrap().rows[0][0].as_deref(),
+            Some("Bob")
+        );
         assert_eq!(
             layers
                 .iter()
@@ -382,25 +486,37 @@ mod tests {
             vec!["name", "amount"]
         );
         assert_eq!(
-            sales.query(&[], None).unwrap().rows,
+            sales.query_page(&[], None, 0, 10).unwrap().rows,
             vec![
                 vec![Some("Alice".into()), Some("10".into())],
                 vec![Some("Bob".into()), Some("2".into())],
             ]
         );
         assert_eq!(
-            sales.query(&[(0, "ali".into())], None).unwrap().rows,
+            sales
+                .query_page(&[(0, "ali".into())], None, 0, 10)
+                .unwrap()
+                .rows,
             vec![vec![Some("Alice".into()), Some("10".into())]]
         );
         assert_eq!(
-            sales.query(&[], Some((1, false))).unwrap().rows[0][0].as_deref(),
+            sales.query_page(&[], Some((1, false)), 0, 1).unwrap().rows[0][0].as_deref(),
             Some("Bob")
         );
         assert_eq!(other.columns[0].name, "label");
         assert_eq!(
-            other.query(&[], None).unwrap().rows,
+            other.query_page(&[], None, 0, 1).unwrap().rows,
             vec![vec![Some("second".into())]]
         );
+        let all_other = other.query_all(&[], None).unwrap();
+        assert_eq!(all_other.rows.len(), 150);
+        assert_eq!(all_other.rows[149][0].as_deref(), Some("row_150"));
+        assert_eq!(sales.count(&[]).unwrap(), 2);
+        assert_eq!(
+            sales.query_page(&[], None, 1, 1).unwrap().rows[0][0].as_deref(),
+            Some("Bob")
+        );
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
@@ -428,7 +544,6 @@ mod tests {
             let tiles = layer_data(&path, layers[1].as_ref())?;
             Ok((layers, metadata, tiles))
         })();
-        let _ = std::fs::remove_file(&path);
         let (layers, metadata, tiles) = result.unwrap();
         assert_eq!(
             layers
@@ -446,18 +561,25 @@ mod tests {
             vec![("name", ColumnKind::Text), ("amount", ColumnKind::Number)]
         );
         assert_eq!(
-            metadata.query(&[], None).unwrap().rows,
+            metadata.query_page(&[], None, 0, 10).unwrap().rows,
             vec![
                 vec![Some("Alice".into()), Some("10".into())],
                 vec![Some("Bob".into()), Some("2".into())],
             ]
         );
         assert_eq!(
-            metadata.query(&[(0, "ali".into())], None).unwrap().rows,
+            metadata
+                .query_page(&[(0, "ali".into())], None, 0, 10)
+                .unwrap()
+                .rows,
             vec![vec![Some("Alice".into()), Some("10".into())]]
         );
         assert_eq!(
-            metadata.query(&[], Some((1, false))).unwrap().rows[0][0].as_deref(),
+            metadata
+                .query_page(&[], Some((1, false)), 0, 1)
+                .unwrap()
+                .rows[0][0]
+                .as_deref(),
             Some("Bob")
         );
         assert_eq!(
@@ -469,9 +591,15 @@ mod tests {
             vec![ColumnKind::Number, ColumnKind::Blob]
         );
         assert_eq!(
-            tiles.query(&[], None).unwrap().rows,
+            tiles.query_page(&[], None, 0, 10).unwrap().rows,
             vec![vec![Some("1".into()), Some("3 bytes".into())]]
         );
+        assert_eq!(metadata.count(&[(0, "ali".into())]).unwrap(), 1);
+        assert_eq!(
+            metadata.query_page(&[], None, 1, 1).unwrap().rows[0][0].as_deref(),
+            Some("Bob")
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -488,9 +616,9 @@ mod tests {
                     .iter()
                     .map(|column| (column.name.clone(), column.kind))
                     .collect::<Vec<_>>(),
-                table.query(&[], None)?.rows,
-                table.query(&[(0, "ali".into())], None)?.rows,
-                table.query(&[], Some((1, false)))?.rows,
+                table.query_page(&[], None, 0, 10)?.rows,
+                table.query_page(&[(0, "ali".into())], None, 0, 10)?.rows,
+                table.query_page(&[], Some((1, false)), 0, 10)?.rows,
             ))
         })();
         std::fs::remove_file(&path).unwrap();
@@ -520,11 +648,70 @@ mod tests {
     }
 
     #[test]
+    fn csv_view_reads_appended_rows_and_pages() {
+        let path = std::env::temp_dir().join(format!("tabulite-'lazy'-{}.csv", std::process::id()));
+        std::fs::write(&path, "name,amount\nAlice,10\nBob,2\n").unwrap();
+        let result = (|| -> Result<()> {
+            let table = layer_data(&path, "unused")?;
+            assert_eq!(table.loading_mode, LoadingMode::Paged);
+            assert_eq!(table.count(&[])?, 2);
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)?
+                .write_all(b"Carol,3\n")?;
+            assert_eq!(table.count(&[])?, 3);
+            assert_eq!(table.count(&[(0, "ar".into())])?, 1);
+            assert_eq!(
+                table.query_page(&[], Some((1, false)), 1, 1)?.rows,
+                vec![vec![Some("Carol".into()), Some("3".into())]]
+            );
+            assert!(table.query_page(&[], None, 0, 0)?.rows.is_empty());
+            assert!(table.query_page(&[], None, 10, 2)?.rows.is_empty());
+            Ok(())
+        })();
+        std::fs::remove_file(&path).unwrap();
+        result.unwrap();
+    }
+
+    #[test]
+    fn sorted_page_boundaries_are_stable_for_equal_keys() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE data (name VARCHAR, amount INTEGER); \
+             INSERT INTO data VALUES ('Zoe', 10), ('Alice', 10), ('Bob', 10), ('Carol', 2)",
+        )
+        .unwrap();
+        let table = TableData {
+            connection: Arc::new(Mutex::new(conn)),
+            loading_mode: LoadingMode::Paged,
+            columns: vec![
+                TableColumn {
+                    name: "name".into(),
+                    kind: ColumnKind::Text,
+                },
+                TableColumn {
+                    name: "amount".into(),
+                    kind: ColumnKind::Number,
+                },
+            ],
+        };
+        let full = table.query_page(&[], Some((1, false)), 0, 4).unwrap().rows;
+        assert_eq!(full[0][0].as_deref(), Some("Carol"));
+        for (ix, row) in full.into_iter().enumerate() {
+            assert_eq!(
+                table.query_page(&[], Some((1, false)), ix, 1).unwrap().rows,
+                vec![row]
+            );
+        }
+    }
+
+    #[test]
     fn filters_are_literal_case_insensitive_and_sort_is_numeric() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE data (\"a\"\"b\" VARCHAR, amount INTEGER); INSERT INTO data VALUES ('A_%', 10), ('aX%', 2), (NULL, NULL)").unwrap();
         let table = TableData {
             connection: Arc::new(Mutex::new(conn)),
+            loading_mode: LoadingMode::Paged,
             columns: vec![
                 TableColumn {
                     name: "a\"b".into(),
@@ -536,12 +723,16 @@ mod tests {
                 },
             ],
         };
+        assert_eq!(table.count(&[(0, "a_%".into())]).unwrap(), 1);
         assert_eq!(
-            table.query(&[(0, "a_%".into())], None).unwrap().rows,
+            table
+                .query_page(&[(0, "a_%".into())], None, 0, 10)
+                .unwrap()
+                .rows,
             vec![vec![Some("A_%".into()), Some("10".into())]]
         );
         assert_eq!(
-            table.query(&[], Some((1, false))).unwrap().rows[0][1].as_deref(),
+            table.query_page(&[], Some((1, false)), 0, 1).unwrap().rows[0][1].as_deref(),
             Some("2")
         );
     }

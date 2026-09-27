@@ -1,5 +1,9 @@
-use crate::tableio::{ColumnKind, TableData, TableRows};
-use std::collections::HashMap;
+use crate::tableio::{ColumnKind, LoadingMode, TableData, TableRows};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Range,
+    time::Duration,
+};
 
 use gpui_kit::component::{
     ActiveTheme, Icon, IconName, Sizable, Size, StyleSized,
@@ -12,7 +16,13 @@ use gpui_kit::*;
 
 #[derive(Default)]
 pub struct TableLayer {
-    data: Vec<Vec<Option<String>>>,
+    data: HashMap<usize, Vec<Vec<Option<String>>>>,
+    pending_pages: HashSet<usize>,
+    first_page_pending: bool,
+    row_count: usize,
+    visible_start: usize,
+    visible_end: usize,
+    filters: Vec<(usize, String)>,
     source: Option<TableData>,
     sort: Option<(usize, bool)>,
     query_generation: u64,
@@ -24,15 +34,40 @@ pub struct TableLayer {
     selected_col: Option<usize>,
 }
 
-const NULL: &'static str = "null";
+const NULL: &str = "null";
+pub(crate) const PAGE_SIZE: usize = 128;
+const MAX_CACHED_PAGES: usize = 8;
+const MAX_PENDING_PAGES: usize = 2;
 
 impl TableLayer {
-    pub fn update_data(&mut self, data: TableData, rows: TableRows) {
+    pub fn update_data(&mut self, data: TableData, row_count: usize, first_page: TableRows) {
+        let eager = data.loading_mode == LoadingMode::Eager;
         self.source = Some(data);
-        self.data = rows.rows;
+        self.data.clear();
+        if eager {
+            self.store_rows(first_page);
+        } else if row_count > 0 {
+            self.data.insert(0, first_page.rows);
+        }
+        self.pending_pages.clear();
+        self.first_page_pending = false;
+        self.row_count = row_count;
+        self.visible_start = 0;
+        self.visible_end = 0;
+        self.filters.clear();
         self.sort = None;
         self.query_generation += 1;
         self.create_column_info();
+    }
+
+    fn store_rows(&mut self, rows: TableRows) {
+        self.data.clear();
+        for (ix, row) in rows.rows.into_iter().enumerate() {
+            self.data
+                .entry(ix / PAGE_SIZE * PAGE_SIZE)
+                .or_default()
+                .push(row);
+        }
     }
 
     pub fn columns_count(&self) -> usize {
@@ -40,7 +75,17 @@ impl TableLayer {
     }
 
     pub fn rows_count(&self) -> usize {
-        self.data.len()
+        self.row_count
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.query_generation
+    }
+
+    pub(crate) fn set_row_count(&mut self, count: usize) {
+        self.row_count = count;
+        self.data.retain(|page, _| *page < count);
+        self.pending_pages.retain(|page| *page < count);
     }
 
     pub fn set_table_focus_handle(&mut self, focus_handle: FocusHandle) {
@@ -131,28 +176,215 @@ impl TableLayer {
         let Some(source) = self.source.clone() else {
             return;
         };
+        let filter_changed = filters != self.filters;
+        self.filters = filters.clone();
         self.query_generation += 1;
         let generation = self.query_generation;
         let sort = self.sort;
+        self.data.clear();
+        self.pending_pages.clear();
+        self.first_page_pending = true;
+        if source.loading_mode == LoadingMode::Eager {
+            self.row_count = 0;
+        }
+        cx.notify();
         cx.spawn(async move |table_state, cx| {
+            if filter_changed {
+                cx.background_executor()
+                    .timer(Duration::from_millis(180))
+                    .await;
+                if !table_state
+                    .read_with(cx, |table, _| {
+                        table.delegate().query_generation == generation
+                    })
+                    .unwrap_or(false)
+                {
+                    return;
+                }
+            }
+            if source.loading_mode == LoadingMode::Eager {
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { source.query_all(&filters, sort) })
+                    .await;
+                match result {
+                    Ok(rows) => {
+                        let _ = table_state.update(cx, |table_state, cx| {
+                            let delegate = table_state.delegate_mut();
+                            if delegate.query_generation != generation {
+                                return;
+                            }
+                            delegate.row_count = rows.rows.len();
+                            delegate.store_rows(rows);
+                            delegate.first_page_pending = false;
+                            table_state.scroll_to_row(0, cx);
+                            table_state.refresh(cx);
+                            cx.notify();
+                        });
+                    }
+                    Err(err) => log::error!("Failed to query table: {err}"),
+                }
+                return;
+            }
+            let page_source = source.clone();
+            let page_filters = filters.clone();
             let result = cx
                 .background_executor()
-                .spawn(async move { source.query(&filters, sort) })
+                .spawn(async move {
+                    let mut rows = page_source.query_page(&page_filters, sort, 0, PAGE_SIZE + 1)?;
+                    let has_more = rows.rows.len() > PAGE_SIZE;
+                    rows.rows.truncate(PAGE_SIZE);
+                    anyhow::Ok((rows, has_more))
+                })
                 .await;
             match result {
-                Ok(rows) => {
-                    let _ = table_state.update(cx, |table_state, cx| {
-                        let delegate = table_state.delegate_mut();
-                        if delegate.query_generation == generation {
-                            delegate.data = rows.rows;
+                Ok((rows, has_more)) => {
+                    let initial_count = rows.rows.len() + usize::from(has_more);
+                    let updated = table_state
+                        .update(cx, |table_state, cx| {
+                            let delegate = table_state.delegate_mut();
+                            if delegate.query_generation != generation {
+                                return false;
+                            }
+                            delegate.row_count = initial_count;
+                            delegate.first_page_pending = false;
+                            if initial_count > 0 {
+                                delegate.data.insert(0, rows.rows);
+                            }
+                            delegate.visible_start = 0;
+                            delegate.visible_end = 0;
+                            table_state.scroll_to_row(0, cx);
+                            let visible = table_state.visible_range().rows().clone();
+                            table_state.delegate_mut().request_range(visible, cx);
+                            table_state.refresh(cx);
                             cx.notify();
+                            true
+                        })
+                        .unwrap_or(false);
+                    if updated && has_more {
+                        let count = cx
+                            .background_executor()
+                            .spawn(async move { source.count(&filters) })
+                            .await;
+                        match count {
+                            Ok(count) => {
+                                let _ = table_state.update(cx, |table_state, cx| {
+                                    if table_state.delegate().query_generation != generation {
+                                        return;
+                                    }
+                                    table_state.delegate_mut().set_row_count(count);
+                                    let visible = table_state.visible_range().rows().clone();
+                                    table_state.delegate_mut().request_range(visible, cx);
+                                    table_state.refresh(cx);
+                                    cx.notify();
+                                });
+                            }
+                            Err(err) => log::error!("Failed to count table rows: {err}"),
                         }
-                    });
+                    }
                 }
                 Err(err) => log::error!("Failed to query table: {err}"),
             }
         })
         .detach();
+    }
+
+    pub(crate) fn cell(&self, row_ix: usize, col_ix: usize) -> Option<Option<&str>> {
+        self.data
+            .get(&(row_ix / PAGE_SIZE * PAGE_SIZE))?
+            .get(row_ix % PAGE_SIZE)
+            .map(|row| row[col_ix].as_deref())
+    }
+
+    pub(crate) fn request_range(
+        &mut self,
+        range: Range<usize>,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        self.visible_start = range.start;
+        self.visible_end = range.end;
+        if self.first_page_pending
+            || self
+                .source
+                .as_ref()
+                .is_some_and(|source| source.loading_mode == LoadingMode::Eager)
+        {
+            return;
+        }
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        let end = range.end.min(self.row_count);
+        if end <= range.start {
+            return;
+        }
+        let first = range.start / PAGE_SIZE * PAGE_SIZE;
+        let last = (end - 1) / PAGE_SIZE * PAGE_SIZE;
+        let before = first.checked_sub(PAGE_SIZE);
+        let after = last
+            .checked_add(PAGE_SIZE)
+            .filter(|page| *page < self.row_count);
+        for page in (first..=last).step_by(PAGE_SIZE).chain(before).chain(after) {
+            if self.pending_pages.len() >= MAX_PENDING_PAGES {
+                break;
+            }
+            if self.data.contains_key(&page) || !self.pending_pages.insert(page) {
+                continue;
+            }
+            let source = source.clone();
+            let filters = self.filters.clone();
+            let sort = self.sort;
+            let generation = self.query_generation;
+            cx.spawn(async move |table_state, cx| {
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { source.query_page(&filters, sort, page, PAGE_SIZE) })
+                    .await;
+                let _ = table_state.update(cx, |table_state, cx| {
+                    let delegate = table_state.delegate_mut();
+                    if delegate.query_generation != generation {
+                        return;
+                    }
+                    delegate.pending_pages.remove(&page);
+                    match result {
+                        Ok(rows) => {
+                            delegate.data.insert(page, rows.rows);
+                            delegate.evict_distant_pages();
+                            let visible = delegate.visible_start..delegate.visible_end;
+                            delegate.request_range(visible, cx);
+                            cx.notify();
+                        }
+                        Err(err) => log::error!("Failed to fetch rows at {page}: {err}"),
+                    }
+                });
+            })
+            .detach();
+        }
+    }
+
+    fn evict_distant_pages(&mut self) {
+        if self
+            .source
+            .as_ref()
+            .is_some_and(|source| source.loading_mode == LoadingMode::Eager)
+        {
+            return;
+        }
+        let visible_pages = self
+            .visible_end
+            .saturating_sub(self.visible_start)
+            .div_ceil(PAGE_SIZE)
+            + 1;
+        while self.data.len() > MAX_CACHED_PAGES.max(visible_pages + 2) {
+            let farthest = self
+                .data
+                .keys()
+                .copied()
+                .max_by_key(|page| page.abs_diff(self.visible_start / PAGE_SIZE * PAGE_SIZE));
+            if let Some(page) = farthest {
+                self.data.remove(&page);
+            }
+        }
     }
 
     fn on_filter_input_event(
@@ -189,7 +421,9 @@ impl TableLayer {
                     name.as_ref(),
                     dtype,
                     self.data
-                        .iter()
+                        .get(&0)
+                        .into_iter()
+                        .flatten()
                         .take(100)
                         .filter_map(|row| row[col_ix].clone()),
                 );
@@ -224,12 +458,26 @@ impl TableDelegate for TableLayer {
     }
 
     fn columns_count(&self, _: &App) -> usize {
-        debug_assert!(self.data.iter().all(|row| row.len() == self.columns.len()));
+        debug_assert!(
+            self.data
+                .values()
+                .flatten()
+                .all(|row| row.len() == self.columns.len())
+        );
         self.columns.len()
     }
 
     fn rows_count(&self, _: &App) -> usize {
-        self.data.len()
+        self.row_count
+    }
+
+    fn visible_rows_changed(
+        &mut self,
+        visible_range: Range<usize>,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        self.request_range(visible_range, cx);
     }
 
     fn column(&self, col_ix: usize, _: &App) -> Column {
@@ -357,13 +605,14 @@ impl TableDelegate for TableLayer {
         _: &mut Window,
         cx: &mut Context<'_, TableState<Self>>,
     ) -> impl IntoElement {
-        match self.data[row_ix][col_ix].as_ref() {
-            None => div()
+        match self.cell(row_ix, col_ix) {
+            None => div(),
+            Some(None) => div()
                 .flex()
                 .justify_center()
                 .child(Tag::secondary().outline().xsmall().child(NULL))
                 .text_color(cx.theme().accent),
-            Some(value) => {
+            Some(Some(value)) => {
                 let align = self.columns[col_ix].align;
                 div()
                     .flex()
@@ -372,13 +621,16 @@ impl TableDelegate for TableLayer {
                     .truncate()
                     .when(align == TextAlign::Center, |this| this.justify_center())
                     .when(align == TextAlign::Right, |this| this.justify_end())
-                    .child(SharedString::new(value.clone()))
+                    .child(SharedString::new(value))
             }
         }
     }
 
     fn cell_text(&self, row_ix: usize, col_ix: usize, _: &App) -> String {
-        self.data[row_ix][col_ix].clone().unwrap_or_default()
+        self.cell(row_ix, col_ix)
+            .flatten()
+            .unwrap_or_default()
+            .to_string()
     }
 
     fn perform_sort(
@@ -393,6 +645,13 @@ impl TableDelegate for TableLayer {
             ColumnSort::Descending => Some((col_ix, true)),
             ColumnSort::Default => None,
         };
+        for (ix, column) in self.columns.iter_mut().enumerate() {
+            column.sort = Some(if ix == col_ix {
+                sort
+            } else {
+                ColumnSort::Default
+            });
+        }
         self.filter_data(cx);
     }
 }
@@ -426,6 +685,73 @@ fn column_widths(
 mod tests {
     use super::*;
     use core::prelude::v1::test;
+
+    #[test]
+    fn keeps_only_a_bounded_page_of_a_large_file() {
+        let path =
+            std::env::temp_dir().join(format!("tabulite-page-cache-{}.csv", std::process::id()));
+        let mut csv = String::from("name,amount\n");
+        for ix in 0..1024 {
+            csv.push_str(&format!("row_{ix},{ix}\n"));
+        }
+        std::fs::write(&path, csv).unwrap();
+        let result = (|| -> anyhow::Result<()> {
+            let source = crate::tableio::layer_data(&path, "page-cache")?;
+            let count = source.count(&[])?;
+            let page = source.query_page(&[], None, 0, PAGE_SIZE)?;
+            let mut layer = TableLayer::default();
+            layer.update_data(source, count, page);
+            assert_eq!(layer.rows_count(), 1024);
+            assert_eq!(layer.data.len(), 1);
+            assert_eq!(layer.data[&0].len(), PAGE_SIZE);
+            assert_eq!(layer.cell(0, 0), Some(Some("row_0")));
+            assert_eq!(layer.cell(PAGE_SIZE - 1, 0), Some(Some("row_127")));
+            assert_eq!(layer.cell(PAGE_SIZE, 0), None);
+            Ok(())
+        })();
+        std::fs::remove_file(path).unwrap();
+        result.unwrap();
+    }
+
+    #[test]
+    fn eager_tables_keep_every_row_across_page_boundaries() {
+        let path = std::env::temp_dir().join(format!("tabulite-eager-{}.csv", std::process::id()));
+        let mut csv = String::from("name,amount\n");
+        for ix in 0..300 {
+            csv.push_str(&format!("row_{ix},{ix}\n"));
+        }
+        std::fs::write(&path, csv).unwrap();
+        let result = (|| -> anyhow::Result<()> {
+            let mut source = crate::tableio::layer_data(&path, "eager")?;
+            source.loading_mode = LoadingMode::Eager;
+            let rows = source.query_all(&[], None)?;
+            let mut layer = TableLayer::default();
+            layer.update_data(source, rows.rows.len(), rows);
+            assert_eq!(layer.rows_count(), 300);
+            assert_eq!(layer.cell(0, 0), Some(Some("row_0")));
+            assert_eq!(layer.cell(128, 0), Some(Some("row_128")));
+            assert_eq!(layer.cell(299, 0), Some(Some("row_299")));
+            layer.evict_distant_pages();
+            assert_eq!(layer.data.len(), 3);
+            Ok(())
+        })();
+        std::fs::remove_file(path).unwrap();
+        result.unwrap();
+    }
+
+    #[test]
+    fn evicts_pages_outside_the_visible_range() {
+        let mut layer = TableLayer::default();
+        layer.visible_start = 9 * PAGE_SIZE;
+        layer.visible_end = 10 * PAGE_SIZE;
+        for page in 0..10 {
+            layer.data.insert(page * PAGE_SIZE, vec![vec![None]]);
+        }
+        layer.evict_distant_pages();
+        assert!(layer.data.len() <= MAX_CACHED_PAGES);
+        assert!(!layer.data.contains_key(&0));
+        assert!(layer.data.contains_key(&(9 * PAGE_SIZE)));
+    }
 
     #[test]
     fn constrains_inferred_column_widths() {

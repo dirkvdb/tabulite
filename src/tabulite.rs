@@ -91,8 +91,8 @@ impl Tabulite {
         cx.spawn(async move |_, cx| match prompt.await {
             Ok(Ok(Some(paths))) => {
                 if let Some(path) = paths.into_iter().next() {
-                    let _ = table.update(cx, |_, cx| {
-                        TableView::load_table(path, cx).detach();
+                    let _ = table.update(cx, |view, cx| {
+                        view.load_table(path, cx).detach();
                     });
                 }
             }
