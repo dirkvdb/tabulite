@@ -205,14 +205,18 @@ impl TableView {
             // Move blocking I/O to a thread pool
             let layer_data = cx
                 .background_executor()
-                .spawn(async move { tableio::layer_data(&path, &layer) })
+                .spawn(async move {
+                    let data = tableio::layer_data(&path, &layer)?;
+                    let rows = data.query(&[], None)?;
+                    anyhow::Ok((data, rows))
+                })
                 .await;
             match layer_data {
-                Ok(data) => {
+                Ok((data, rows)) => {
                     let _ = this.update_in(cx, |this, window, cx| {
                         this.table.update(cx, |table, cx| {
                             table.sortable = true;
-                            table.delegate_mut().update_data(data);
+                            table.delegate_mut().update_data(data, rows);
                             table.refresh(cx);
                             cx.notify();
                         });

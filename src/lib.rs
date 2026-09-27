@@ -13,6 +13,7 @@ use crate::tabulite::SelectPreviousRow;
 use crate::tabulite::ToggleFilter;
 
 pub mod appconfig;
+mod excel;
 mod tableio;
 mod tablelayer;
 mod tableview;

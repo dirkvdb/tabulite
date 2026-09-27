@@ -1,4 +1,7 @@
 { pkgs, lib, ... }:
+let
+  duckdb = import ./duckdb.nix { inherit pkgs; };
+in
 {
   languages.rust = {
     enable = true;
@@ -15,8 +18,10 @@
 
   packages = with pkgs; [
     cargo-nextest
+    duckdb.lib
+    duckdb.dev
     just
-  ] ++ lib.optionals pkgs.stdenv.isLinux [
+    sccache
     pkg-config
     fontconfig
     fontconfig.dev
@@ -27,12 +32,17 @@
     apple-sdk_15
   ];
 
-  env = lib.optionalAttrs pkgs.stdenv.isLinux {
+  env = {
+    RUSTC_WRAPPER = "${pkgs.sccache}/bin/sccache";
+    DUCKDB_LIB_DIR = "${duckdb.lib}/lib";
+    DUCKDB_INCLUDE_DIR = "${duckdb.dev}/include";
+  } // lib.optionalAttrs pkgs.stdenv.isLinux {
     LD_LIBRARY_PATH = lib.makeLibraryPath [
       pkgs.wayland
       pkgs.libxkbcommon
       pkgs.xorg.libxcb
       pkgs.vulkan-loader
+      duckdb.lib
     ];
   };
 }

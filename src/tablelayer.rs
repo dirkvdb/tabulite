@@ -1,7 +1,4 @@
-use polars::{
-    frame::DataFrame,
-    prelude::{AnyValue, DataType, IntoLazy, PlSmallStr, col, lit},
-};
+use crate::tableio::{ColumnKind, TableData, TableRows};
 use std::collections::HashMap;
 
 use gpui_kit::component::{
@@ -15,8 +12,10 @@ use gpui_kit::*;
 
 #[derive(Default)]
 pub struct TableLayer {
-    data: polars::frame::DataFrame,
-    original_data: polars::frame::DataFrame,
+    data: Vec<Vec<Option<String>>>,
+    source: Option<TableData>,
+    sort: Option<(usize, bool)>,
+    query_generation: u64,
     filter_enabled: bool,
     filter_inputs: Vec<Entity<InputState>>,
     input_subscriptions: Vec<Subscription>,
@@ -28,9 +27,11 @@ pub struct TableLayer {
 const NULL: &'static str = "null";
 
 impl TableLayer {
-    pub fn update_data(&mut self, data: polars::frame::DataFrame) {
-        self.original_data = data.clone();
-        self.data = data;
+    pub fn update_data(&mut self, data: TableData, rows: TableRows) {
+        self.source = Some(data);
+        self.data = rows.rows;
+        self.sort = None;
+        self.query_generation += 1;
         self.create_column_info();
     }
 
@@ -39,7 +40,7 @@ impl TableLayer {
     }
 
     pub fn rows_count(&self) -> usize {
-        self.data.height()
+        self.data.len()
     }
 
     pub fn set_table_focus_handle(&mut self, focus_handle: FocusHandle) {
@@ -114,67 +115,41 @@ impl TableLayer {
     }
 
     fn filter_data(&mut self, cx: &mut Context<TableState<Self>>) {
-        // Collect filter texts with column names
-        let filters: Vec<(String, String)> = self
+        let filters = self
             .filter_inputs
             .iter()
             .enumerate()
-            .filter_map(|(col_ix, input)| {
-                let filter_text = input.read(cx).value().to_string();
-                if !filter_text.is_empty() {
-                    let col_name = self
-                        .columns
-                        .get(col_ix)
-                        .map(|col| col.key.to_string())
-                        .unwrap_or_default();
-                    Some((col_name, filter_text))
-                } else {
-                    None
-                }
+            .filter_map(|(ix, input)| {
+                let text = input.read(cx).value().to_string();
+                (!text.is_empty()).then_some((ix, text))
             })
             .collect();
+        self.refresh_data(filters, cx);
+    }
 
-        if filters.is_empty() {
-            self.data = self.original_data.clone();
+    fn refresh_data(&mut self, filters: Vec<(usize, String)>, cx: &mut Context<TableState<Self>>) {
+        let Some(source) = self.source.clone() else {
             return;
-        }
-
-        // Clone the data to move into background task
-        let data = self.original_data.clone();
-
-        // Spawn background task to perform filtering
+        };
+        self.query_generation += 1;
+        let generation = self.query_generation;
+        let sort = self.sort;
         cx.spawn(async move |table_state, cx| {
-            let filtered_data = cx
+            let result = cx
                 .background_executor()
-                .spawn(async move {
-                    let mut lazy_df = data.lazy();
-
-                    // Apply each filter using polars lazy API
-                    for (col_name, filter_text) in filters {
-                        // Create filter expression: cast to string, convert to lowercase, check if contains filter text
-                        let filter_expr = col(&col_name)
-                            .cast(polars::prelude::DataType::String)
-                            .str()
-                            .to_lowercase()
-                            .str()
-                            .contains(
-                                lit(filter_text.to_lowercase()),
-                                true, /* literal, use false for regex support*/
-                            );
-
-                        lazy_df = lazy_df.filter(filter_expr);
-                    }
-
-                    lazy_df.collect().ok()
-                })
+                .spawn(async move { source.query(&filters, sort) })
                 .await;
-
-            // Update the data on the UI thread
-            if let Some(filtered) = filtered_data {
-                let _ = table_state.update(cx, |table_state, cx| {
-                    table_state.delegate_mut().data = filtered;
-                    cx.notify();
-                });
+            match result {
+                Ok(rows) => {
+                    let _ = table_state.update(cx, |table_state, cx| {
+                        let delegate = table_state.delegate_mut();
+                        if delegate.query_generation == generation {
+                            delegate.data = rows.rows;
+                            cx.notify();
+                        }
+                    });
+                }
+                Err(err) => log::error!("Failed to query table: {err}"),
             }
         })
         .detach();
@@ -200,21 +175,23 @@ impl TableLayer {
             .iter()
             .map(|column| (column.key.clone(), column.width))
             .collect();
-        let schema = self.data.schema();
-        self.columns = schema
+        let Some(source) = &self.source else {
+            return;
+        };
+        self.columns = source
+            .columns
             .iter()
             .enumerate()
-            .map(|(col_ix, (name, dtype))| {
-                let name = SharedString::new(name.as_str());
+            .map(|(col_ix, column_info)| {
+                let name = SharedString::new(column_info.name.as_str());
+                let dtype = column_info.kind;
                 let (min_width, preferred_width, max_width) = column_widths(
                     name.as_ref(),
                     dtype,
-                    (0..self.data.height().min(100)).filter_map(|row_ix| {
-                        self.data[col_ix]
-                            .get(row_ix)
-                            .ok()
-                            .map(|value| format_cell_value(&value))
-                    }),
+                    self.data
+                        .iter()
+                        .take(100)
+                        .filter_map(|row| row[col_ix].clone()),
                 );
                 let width = previous_widths
                     .get(&name)
@@ -226,9 +203,9 @@ impl TableLayer {
                     .min_width(px(min_width))
                     .max_width(px(max_width));
 
-                if dtype.is_numeric() {
+                if matches!(dtype, ColumnKind::Number | ColumnKind::Float) {
                     column = column.text_right();
-                } else if dtype == &DataType::Boolean {
+                } else if dtype == ColumnKind::Boolean {
                     column = column.text_center();
                 }
 
@@ -247,12 +224,12 @@ impl TableDelegate for TableLayer {
     }
 
     fn columns_count(&self, _: &App) -> usize {
-        debug_assert_eq!(self.data.shape().1, self.columns.len());
+        debug_assert!(self.data.iter().all(|row| row.len() == self.columns.len()));
         self.columns.len()
     }
 
     fn rows_count(&self, _: &App) -> usize {
-        self.data.shape().0
+        self.data.len()
     }
 
     fn column(&self, col_ix: usize, _: &App) -> Column {
@@ -380,13 +357,13 @@ impl TableDelegate for TableLayer {
         _: &mut Window,
         cx: &mut Context<'_, TableState<Self>>,
     ) -> impl IntoElement {
-        match self.data[col_ix].get(row_ix) {
-            Ok(AnyValue::Null) => div()
+        match self.data[row_ix][col_ix].as_ref() {
+            None => div()
                 .flex()
                 .justify_center()
                 .child(Tag::secondary().outline().xsmall().child(NULL))
                 .text_color(cx.theme().accent),
-            Ok(value) => {
+            Some(value) => {
                 let align = self.columns[col_ix].align;
                 div()
                     .flex()
@@ -395,17 +372,13 @@ impl TableDelegate for TableLayer {
                     .truncate()
                     .when(align == TextAlign::Center, |this| this.justify_center())
                     .when(align == TextAlign::Right, |this| this.justify_end())
-                    .child(SharedString::new(format_cell_value(&value)))
+                    .child(SharedString::new(value.clone()))
             }
-            Err(_) => div().child(SharedString::new("ERR")),
         }
     }
 
     fn cell_text(&self, row_ix: usize, col_ix: usize, _: &App) -> String {
-        self.data[col_ix]
-            .get(row_ix)
-            .map(|value| format_cell_value(&value))
-            .unwrap_or_default()
+        self.data[row_ix][col_ix].clone().unwrap_or_default()
     }
 
     fn perform_sort(
@@ -413,84 +386,29 @@ impl TableDelegate for TableLayer {
         col_ix: usize,
         sort: ColumnSort,
         _: &mut Window,
-        _: &mut Context<TableState<Self>>,
+        cx: &mut Context<TableState<Self>>,
     ) {
-        let col = &self.columns[col_ix];
-
-        let mut temp_df = DataFrame::default();
-        std::mem::swap(&mut self.data, &mut temp_df);
-
-        let df = temp_df.lazy();
-        let sort_options = match sort {
-            ColumnSort::Ascending => polars::prelude::SortMultipleOptions::default(),
-            ColumnSort::Descending => {
-                polars::prelude::SortMultipleOptions::default().with_order_descending(true)
-            }
-            ColumnSort::Default => {
-                // No sorting, return original DataFrame
-                self.data = df.collect().unwrap();
-                return;
-            }
-        }
-        .with_multithreaded(true)
-        .with_nulls_last(true);
-
-        self.data = df
-            .sort(vec![PlSmallStr::from(col.key.as_ref())], sort_options)
-            .collect()
-            .unwrap();
+        self.sort = match sort {
+            ColumnSort::Ascending => Some((col_ix, false)),
+            ColumnSort::Descending => Some((col_ix, true)),
+            ColumnSort::Default => None,
+        };
+        self.filter_data(cx);
     }
-}
-
-fn format_cell_value(value: &AnyValue<'_>) -> String {
-    match value {
-        AnyValue::Null => String::new(),
-        AnyValue::Boolean(true) => "true".to_string(),
-        AnyValue::Boolean(false) => "false".to_string(),
-        AnyValue::Float16(value) => format_float(f32::from(*value) as f64),
-        AnyValue::Float32(value) => format_float(*value as f64),
-        AnyValue::Float64(value) => format_float(*value),
-        AnyValue::String(value) => (*value).to_string(),
-        AnyValue::StringOwned(value) => value.to_string(),
-        AnyValue::Binary(value) => format!("{} bytes", value.len()),
-        AnyValue::BinaryOwned(value) => format!("{} bytes", value.len()),
-        value => value.str_value().into_owned(),
-    }
-}
-
-fn format_float(value: f64) -> String {
-    if !value.is_finite() {
-        return value.to_string();
-    }
-
-    if value != 0.0 && !(0.0001..1_000_000_000.0).contains(&value.abs()) {
-        return format!("{value:.6e}");
-    }
-
-    let mut value = format!("{value:.6}");
-    if value.contains('.') {
-        while value.ends_with('0') {
-            value.pop();
-        }
-        if value.ends_with('.') {
-            value.pop();
-        }
-    }
-    value
 }
 
 fn column_widths(
     name: &str,
-    dtype: &DataType,
+    dtype: ColumnKind,
     values: impl Iterator<Item = String>,
 ) -> (f32, f32, f32) {
-    let (min_width, max_width) = if dtype == &DataType::Boolean {
+    let (min_width, max_width) = if dtype == ColumnKind::Boolean {
         (80.0, 140.0)
-    } else if dtype.is_numeric() {
+    } else if matches!(dtype, ColumnKind::Number | ColumnKind::Float) {
         (90.0, 240.0)
-    } else if dtype.is_temporal() {
+    } else if dtype == ColumnKind::Temporal {
         (130.0, 280.0)
-    } else if dtype.is_string() {
+    } else if dtype == ColumnKind::Text {
         (120.0, 480.0)
     } else {
         (110.0, 360.0)
@@ -510,24 +428,13 @@ mod tests {
     use core::prelude::v1::test;
 
     #[test]
-    fn formats_cells_for_display() {
-        assert_eq!(format_cell_value(&AnyValue::Float64(12.340000)), "12.34");
-        assert_eq!(
-            format_cell_value(&AnyValue::Float64(0.000012)),
-            "1.200000e-5"
-        );
-        assert_eq!(format_cell_value(&AnyValue::String("value")), "value");
-        assert_eq!(format_cell_value(&AnyValue::Null), "");
-    }
-
-    #[test]
     fn constrains_inferred_column_widths() {
         assert_eq!(
-            column_widths("enabled", &DataType::Boolean, [].into_iter()),
+            column_widths("enabled", ColumnKind::Boolean, [].into_iter()),
             (80.0, 92.5, 140.0)
         );
         assert_eq!(
-            column_widths("name", &DataType::String, ["x".repeat(200)].into_iter()),
+            column_widths("name", ColumnKind::Text, ["x".repeat(200)].into_iter()),
             (120.0, 480.0, 480.0)
         );
     }

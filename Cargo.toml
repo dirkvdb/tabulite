@@ -5,20 +5,16 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-inf = { git = "https://github.com/VITObelgium/infra-rs" }
-geo = { git = "https://github.com/VITObelgium/infra-rs", default-features = false, features = [
-  "vector-io-csv",
-  "vector-io-xlsx",
-  "polars",
-] }
+duckdb = "1"
+calamine = "0.36"
 gpui-kit = "0.6"
 anyhow = "1"
 log = "0.4.29"
-toml = "0.9"
+toml = "1.1"
 serde = { version = "1.0", features = ["derive"] }
 dirs = "6"
-polars = { version = "0.55", features = ["lazy", "regex", "strings"] }
 env_logger = "0.11"
 
 [dev-dependencies]
-serial_test = "3.2"
+serial_test = "4"
+zip = { version = "6", default-features = false, features = ["deflate-flate2"] }
