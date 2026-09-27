@@ -27,6 +27,13 @@
           wayland
           vulkan-loader
         ];
+        buildDeps =
+          with pkgs;
+          [
+            fontconfig.dev
+            vulkan-headers
+          ]
+          ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ pkgs.apple-sdk_15 ];
       in
       {
         packages = {
@@ -40,7 +47,12 @@
               pkgs.pkg-config
               pkgs.makeWrapper
             ];
-            buildInputs = [ duckdb.lib duckdb.dev ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux linuxRuntimeDeps;
+            buildInputs = [
+              duckdb.lib
+              duckdb.dev
+            ]
+            ++ buildDeps
+            ++ pkgs.lib.optionals pkgs.stdenv.isLinux linuxRuntimeDeps;
             DUCKDB_LIB_DIR = "${duckdb.lib}/lib";
             DUCKDB_INCLUDE_DIR = "${duckdb.dev}/include";
 
@@ -54,13 +66,7 @@
               install -Dm644 logo.svg $out/share/icons/hicolor/scalable/apps/tabulite.svg
             '';
 
-            # assuming you have a Cargo.lock
-            cargoLock = {
-              lockFile = ./Cargo.lock;
-              outputHashes = {
-                "geo-2026.9.14" = "sha256-Gxf8s6zCalGUNitQODAXSgKu3Jai0ALY4QhwzbBJTVw=";
-              };
-            };
+            cargoLock.lockFile = ./Cargo.lock;
           };
         }
         // (
@@ -76,9 +82,12 @@
                 buildInputs = [
                   staticDuckdb.lib
                   staticDuckdb.dev
-                  pkgs.fontconfig
-                  pkgs.libxcb
-                  pkgs.libxkbcommon
+                  pkgs.pkgsStatic.fontconfig
+                  pkgs.pkgsStatic.fontconfig.dev
+                  pkgs.pkgsStatic.libxcb
+                  pkgs.pkgsStatic.libxkbcommon
+                  pkgs.pkgsStatic.wayland
+                  pkgs.vulkan-headers
                 ];
 
                 DUCKDB_LIB_DIR = "${staticDuckdb.lib}/lib";
@@ -90,12 +99,7 @@
                   install -Dm644 logo.svg $out/share/icons/hicolor/scalable/apps/tabulite.svg
                 '';
 
-                cargoLock = {
-                  lockFile = ./Cargo.lock;
-                  outputHashes = {
-                    "geo-2026.9.14" = "sha256-Gxf8s6zCalGUNitQODAXSgKu3Jai0ALY4QhwzbBJTVw=";
-                  };
-                };
+                cargoLock.lockFile = ./Cargo.lock;
               };
             }
           else
