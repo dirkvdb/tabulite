@@ -12,11 +12,15 @@ actions!(
         DismissFilters,
         Open,
         Quit,
+        ScrollHalfPageDown,
+        ScrollHalfPageUp,
         SelectFirstRow,
         SelectLastRow,
         SelectNextColumn,
+        SelectNextLayer,
         SelectNextRow,
         SelectPreviousColumn,
+        SelectPreviousLayer,
         SelectPreviousRow,
         ToggleFilter,
     ]
@@ -47,6 +51,18 @@ impl Tabulite {
             });
         });
         let weak_view = view.downgrade();
+        cx.on_action(move |_: &SelectPreviousLayer, cx| {
+            let _ = weak_view.update(cx, |view, cx| {
+                view.table.update(cx, TableView::select_previous_layer);
+            });
+        });
+        let weak_view = view.downgrade();
+        cx.on_action(move |_: &SelectNextLayer, cx| {
+            let _ = weak_view.update(cx, |view, cx| {
+                view.table.update(cx, TableView::select_next_layer);
+            });
+        });
+        let weak_view = view.downgrade();
         cx.on_action(move |_: &SelectPreviousRow, cx| {
             let _ = weak_view.update(cx, |view, cx| {
                 view.table.update(cx, TableView::select_previous_row);
@@ -56,6 +72,20 @@ impl Tabulite {
         cx.on_action(move |_: &SelectNextRow, cx| {
             let _ = weak_view.update(cx, |view, cx| {
                 view.table.update(cx, TableView::select_next_row);
+            });
+        });
+        let weak_view = view.downgrade();
+        cx.on_action(move |_: &ScrollHalfPageDown, cx| {
+            let _ = weak_view.update(cx, |view, cx| {
+                view.table
+                    .update(cx, |table, cx| table.scroll_half_page(true, cx));
+            });
+        });
+        let weak_view = view.downgrade();
+        cx.on_action(move |_: &ScrollHalfPageUp, cx| {
+            let _ = weak_view.update(cx, |view, cx| {
+                view.table
+                    .update(cx, |table, cx| table.scroll_half_page(false, cx));
             });
         });
         let weak_view = view.downgrade();

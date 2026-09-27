@@ -277,7 +277,7 @@ impl TableData {
             .map(|column| {
                 let name = quoted(&column.name);
                 if column.kind == ColumnKind::Blob {
-                    format!("CASE WHEN {name} IS NULL THEN NULL ELSE concat(octet_length({name}), ' bytes') END")
+                    format!("CAST(octet_length({name}) AS VARCHAR)")
                 } else {
                     format!("CAST({name} AS VARCHAR)")
                 }
@@ -338,6 +338,8 @@ impl TableData {
                         let text = std::str::from_utf8(bytes)?.to_owned();
                         if column.kind == ColumnKind::Float {
                             Some(format_float(text.parse()?))
+                        } else if column.kind == ColumnKind::Blob {
+                            Some(format_bytes(text.parse()?))
                         } else {
                             Some(text)
                         }
@@ -349,6 +351,26 @@ impl TableData {
             rows.push(cells);
         }
         Ok(TableRows { rows })
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut unit = 0;
+    let mut divisor = 1;
+    while unit < UNITS.len() - 1 && bytes / divisor >= 1024 {
+        divisor *= 1024;
+        unit += 1;
+    }
+    let whole = bytes / divisor;
+    if unit == 0 {
+        return format!("{whole} B");
+    }
+    let tenths = (bytes % divisor) * 10 / divisor;
+    if tenths == 0 {
+        format!("{whole} {}", UNITS[unit])
+    } else {
+        format!("{whole}.{tenths} {}", UNITS[unit])
     }
 }
 
@@ -376,6 +398,23 @@ mod tests {
     use super::*;
     use std::io::Write;
     use zip::{ZipWriter, write::SimpleFileOptions};
+
+    #[test]
+    fn formats_blob_sizes_compactly() {
+        for (bytes, expected) in [
+            (0, "0 B"),
+            (3, "3 B"),
+            (1023, "1023 B"),
+            (1024, "1 KB"),
+            (1536, "1.5 KB"),
+            (1_048_575, "1023.9 KB"),
+            (1_048_576, "1 MB"),
+            (1_572_864, "1.5 MB"),
+            (1_073_741_824, "1 GB"),
+        ] {
+            assert_eq!(format_bytes(bytes), expected);
+        }
+    }
 
     #[test]
     fn recognizes_file_types_and_aliases() {
@@ -533,7 +572,11 @@ mod tests {
                  CREATE TABLE fixture.metadata (name TEXT, amount INTEGER); \
                  INSERT INTO fixture.metadata VALUES ('Alice', 10), ('Bob', 2); \
                  CREATE TABLE fixture.\"tile\"\"data\" (zoom INTEGER, tile_data BLOB); \
-                 INSERT INTO fixture.\"tile\"\"data\" VALUES (1, from_hex('010203')); \
+                 INSERT INTO fixture.\"tile\"\"data\" VALUES \
+                   (1, from_hex('010203')), \
+                   (2, CAST(repeat('a', 1536) AS BLOB)), \
+                   (3, CAST(repeat('a', 1572864) AS BLOB)), \
+                   (4, NULL); \
                  DETACH fixture",
                 path.display()
             ))?;
@@ -591,8 +634,13 @@ mod tests {
             vec![ColumnKind::Number, ColumnKind::Blob]
         );
         assert_eq!(
-            tiles.query_page(&[], None, 0, 10).unwrap().rows,
-            vec![vec![Some("1".into()), Some("3 bytes".into())]]
+            tiles.query_page(&[], Some((0, false)), 0, 10).unwrap().rows,
+            vec![
+                vec![Some("1".into()), Some("3 B".into())],
+                vec![Some("2".into()), Some("1.5 KB".into())],
+                vec![Some("3".into()), Some("1.5 MB".into())],
+                vec![Some("4".into()), None],
+            ]
         );
         assert_eq!(metadata.count(&[(0, "ali".into())]).unwrap(), 1);
         assert_eq!(

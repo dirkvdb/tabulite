@@ -1,17 +1,18 @@
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::scroll::{Scrollbar, ScrollbarAxis};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::table::{
     ColumnSort, DataTable, Table, TableBody, TableCell, TableDelegate, TableEvent, TableHead,
     TableHeader, TableRow, TableState,
 };
+use gpui_kit::component::tag::Tag;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use std::path::PathBuf;
+use std::{ops::Range, path::PathBuf};
 
-use crate::tablelayer::{PAGE_SIZE, TableLayer};
+use crate::tablelayer::{PAGE_SIZE, TableLayer, row_number};
 use crate::tabulite::{ClearFilter, DismissFilters, ToggleFilter};
 use crate::{
     tableio::{self, LoadingMode},
@@ -25,6 +26,7 @@ pub struct TableView {
     file_generation: u64,
     layer_generation: u64,
     table: Entity<TableState<TableLayer>>,
+    eager_scroll: ScrollHandle,
     loading_mode: LoadingMode,
     table_bounds: Bounds<Pixels>,
     _table_subscription: Subscription,
@@ -61,6 +63,7 @@ impl TableView {
             file_generation: 0,
             layer_generation: 0,
             table,
+            eager_scroll: ScrollHandle::new(),
             loading_mode: LoadingMode::Paged,
             table_bounds: Bounds::default(),
             _table_subscription: table_subscription,
@@ -73,15 +76,50 @@ impl TableView {
         view
     }
 
+    pub(crate) fn select_previous_layer(&mut self, cx: &mut Context<Self>) {
+        if self.layer_names.is_empty() {
+            return;
+        }
+        let index = self
+            .active_tab
+            .checked_sub(1)
+            .unwrap_or(self.layer_names.len() - 1);
+        self.select_layer(index, cx);
+    }
+
+    pub(crate) fn select_next_layer(&mut self, cx: &mut Context<Self>) {
+        if self.layer_names.is_empty() {
+            return;
+        }
+        let index = (self.active_tab + 1) % self.layer_names.len();
+        self.select_layer(index, cx);
+    }
+
+    fn select_layer(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(layer_name) = self.layer_names.get(index).cloned() else {
+            return;
+        };
+        self.active_tab = index;
+        if let Some(path) = self.data_path.clone() {
+            self.load_table_layer(path, layer_name.to_string(), cx)
+                .detach();
+        }
+        cx.notify();
+    }
+
     pub(crate) fn select_previous_column(&mut self, cx: &mut Context<Self>) {
         self.table.update(cx, |table, cx| {
             let columns_count = table.delegate().columns_count();
-            if columns_count == 0 {
+            if columns_count <= 1 {
                 return;
             }
 
-            let selected = table.selected_col().unwrap_or(0);
-            let selected = selected.checked_sub(1).unwrap_or(columns_count - 1);
+            let selected = table.selected_col().unwrap_or(1);
+            let selected = if selected <= 1 {
+                columns_count - 1
+            } else {
+                selected - 1
+            };
             table.delegate_mut().set_selected_col(selected);
             table.set_selected_col(selected, cx);
         });
@@ -90,15 +128,50 @@ impl TableView {
     pub(crate) fn select_next_column(&mut self, cx: &mut Context<Self>) {
         self.table.update(cx, |table, cx| {
             let columns_count = table.delegate().columns_count();
-            if columns_count == 0 {
+            if columns_count <= 1 {
                 return;
             }
 
             let selected = table.selected_col().unwrap_or(0);
-            let selected = (selected + 1) % columns_count;
+            let selected = if selected + 1 < columns_count {
+                selected + 1
+            } else {
+                1
+            };
             table.delegate_mut().set_selected_col(selected);
             table.set_selected_col(selected, cx);
         });
+    }
+
+    pub(crate) fn scroll_half_page(&mut self, down: bool, cx: &mut Context<Self>) {
+        match self.loading_mode {
+            LoadingMode::Paged => self.table.update(cx, |table, cx| {
+                let visible = table.visible_range().rows().clone();
+                if let Some((selected, top)) = half_page_move(
+                    visible,
+                    table.delegate().rows_count(),
+                    table.selected_row(),
+                    down,
+                ) {
+                    table.set_selected_row(selected, cx);
+                    table
+                        .vertical_scroll_handle
+                        .scroll_to_item_strict(top, ScrollStrategy::Top);
+                    cx.notify();
+                }
+            }),
+            LoadingMode::Eager => {
+                let step = self.eager_scroll.bounds().size.height / 2.;
+                if step <= px(0.) {
+                    return;
+                }
+                let mut offset = self.eager_scroll.offset();
+                let max = self.eager_scroll.max_offset().y;
+                offset.y = (offset.y + if down { -step } else { step }).clamp(-max, px(0.));
+                self.eager_scroll.set_offset(offset);
+                cx.notify();
+            }
+        }
     }
 
     pub(crate) fn select_previous_row(&mut self, cx: &mut Context<Self>) {
@@ -144,7 +217,7 @@ impl TableView {
 
     pub(crate) fn focus_selected_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.table.update(cx, |table, cx| {
-            let Some(col_ix) = table.selected_col() else {
+            let Some(col_ix) = table.selected_col().filter(|ix| *ix > 0) else {
                 return;
             };
 
@@ -343,14 +416,22 @@ impl TableView {
     ) -> impl IntoElement {
         let column_count = self.table.read(cx).delegate().columns_count();
         let filter_inputs = self.table.update(cx, |table, cx| {
-            (0..column_count)
+            (1..column_count)
                 .map(|ix| table.delegate_mut().filter_input(ix, window, cx))
                 .collect::<Vec<_>>()
         });
         let state = self.table.read(cx);
         let delegate = state.delegate();
-        let mut header = TableRow::new();
-        for (ix, input) in filter_inputs.into_iter().enumerate() {
+        let row_number_width = delegate.column(0, cx).width;
+        let mut header = TableRow::new().child(
+            TableHead::new()
+                .w(row_number_width)
+                .min_w(row_number_width)
+                .text_right()
+                .child("#"),
+        );
+        for (data_ix, input) in filter_inputs.into_iter().enumerate() {
+            let ix = data_ix + 1;
             let column = delegate.column(ix, cx);
             let table = self.table.clone();
             let sort_label = match column.sort {
@@ -388,40 +469,95 @@ impl TableView {
             let mut row = TableRow::new().when(state.selected_row() == Some(row_ix), |row| {
                 row.bg(cx.theme().tokens.table_active)
             });
-            for col_ix in 0..column_count {
+            let table = self.table.clone();
+            row = row.child(
+                TableCell::new()
+                    .w(row_number_width)
+                    .min_w(row_number_width)
+                    .text_right()
+                    .bg(cx.theme().tokens.table_head)
+                    .text_color(cx.theme().table_head_foreground)
+                    .border_r_1()
+                    .border_color(cx.theme().table_row_border)
+                    .child(
+                        div()
+                            .id(("eager-row-number", row_ix))
+                            .size_full()
+                            .child(row_number(row_ix))
+                            .on_click(move |_, _, cx| {
+                                table.update(cx, |state, cx| state.set_selected_row(row_ix, cx));
+                            }),
+                    ),
+            );
+            for data_ix in 0..column_count.saturating_sub(1) {
+                let col_ix = data_ix + 1;
                 let column = delegate.column(col_ix, cx);
-                let text = delegate.cell(row_ix, col_ix).flatten().unwrap_or("null");
+                let badge = delegate.cell_badge(row_ix, data_ix);
+                let content = if let Some(label) = &badge {
+                    div()
+                        .text_color(cx.theme().accent)
+                        .child(
+                            Tag::secondary()
+                                .outline()
+                                .xsmall()
+                                .child(SharedString::new(label)),
+                        )
+                        .into_any_element()
+                } else {
+                    div()
+                        .child(SharedString::new(
+                            delegate.cell(row_ix, data_ix).flatten().unwrap_or_default(),
+                        ))
+                        .into_any_element()
+                };
                 let table = self.table.clone();
                 let mut cell = TableCell::new().w(column.width).child(
                     div()
                         .id(("eager-cell", row_ix * column_count + col_ix))
                         .size_full()
-                        .child(SharedString::new(text))
+                        .child(content)
                         .on_click(move |_, _, cx| {
                             table.update(cx, |state, cx| state.set_selected_row(row_ix, cx));
                         }),
                 );
-                if column.align == TextAlign::Right {
-                    cell = cell.text_right();
-                } else if column.align == TextAlign::Center {
+                if badge.is_some() || column.align == TextAlign::Center {
                     cell = cell.text_center();
+                } else if column.align == TextAlign::Right {
+                    cell = cell.text_right();
                 }
                 row = row.child(cell);
             }
             body = body.child(row);
         }
         div()
+            .id("eager-table")
+            .relative()
             .size_full()
+            .overflow_hidden()
+            .key_context("DataTable")
             .track_focus(&self.table.focus_handle(cx))
             .on_action(cx.listener(Self::on_action_filter))
             .on_action(cx.listener(Self::on_action_clear_filter))
             .on_action(cx.listener(Self::on_action_dismiss_filters))
-            .overflow_scrollbar()
             .child(
-                Table::new()
-                    .xsmall()
-                    .child(TableHeader::new().child(header))
-                    .child(body),
+                div()
+                    .id("eager-table-scroll")
+                    .size_full()
+                    .overflow_scroll()
+                    .track_scroll(&self.eager_scroll)
+                    .child(
+                        Table::new()
+                            .xsmall()
+                            .child(TableHeader::new().child(header))
+                            .child(body),
+                    ),
+            )
+            .child(
+                div().absolute().inset_0().child(
+                    Scrollbar::new(&self.eager_scroll)
+                        .axis(ScrollbarAxis::Both)
+                        .viewport_from_layout(),
+                ),
             )
     }
 
@@ -443,6 +579,52 @@ impl TableView {
                     }
                 });
             })
+    }
+}
+
+fn half_page_move(
+    visible: Range<usize>,
+    row_count: usize,
+    selected: Option<usize>,
+    down: bool,
+) -> Option<(usize, usize)> {
+    let last = row_count.checked_sub(1)?;
+    let step = (visible.end.saturating_sub(visible.start) / 2).max(1);
+    let top = visible.start.min(last);
+    let new_top = if down {
+        top.saturating_add(step).min(last)
+    } else {
+        top.saturating_sub(step)
+    };
+    let anchor = selected
+        .filter(|row| visible.contains(row))
+        .unwrap_or(if down {
+            top
+        } else {
+            visible.end.saturating_sub(1).min(last)
+        });
+    let new_selected = if down {
+        anchor.saturating_add(step).min(last)
+    } else {
+        anchor.saturating_sub(step)
+    };
+    Some((new_selected, new_top))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::half_page_move;
+
+    #[test]
+    fn half_page_navigation_moves_selection_and_viewport_without_wrapping() {
+        assert_eq!(half_page_move(20..40, 100, Some(25), true), Some((35, 30)));
+        assert_eq!(half_page_move(20..40, 100, Some(25), false), Some((15, 10)));
+        assert_eq!(half_page_move(20..40, 100, None, true), Some((30, 30)));
+        assert_eq!(half_page_move(20..40, 100, None, false), Some((29, 10)));
+        assert_eq!(half_page_move(95..100, 100, Some(98), true), Some((99, 97)));
+        assert_eq!(half_page_move(0..20, 100, Some(3), false), Some((0, 0)));
+        assert_eq!(half_page_move(0..0, 0, None, true), None);
+        assert_eq!(half_page_move(0..1, 1, None, true), Some((0, 0)));
     }
 }
 
@@ -473,11 +655,7 @@ impl Render for TableView {
         let mut tab_bar = TabBar::new("layers")
             .selected_index(self.active_tab)
             .on_click(cx.listener(|view, index, _, cx| {
-                view.active_tab = *index;
-                let path = view.data_path.clone().unwrap();
-                let layer_name = view.layer_names[*index].to_string();
-                view.load_table_layer(path, layer_name, cx).detach();
-                cx.notify();
+                view.select_layer(*index, cx);
             }));
 
         for layer in &self.layer_names {

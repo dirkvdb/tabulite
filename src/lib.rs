@@ -4,11 +4,15 @@ use crate::tabulite::ClearFilter;
 use crate::tabulite::DismissFilters;
 use crate::tabulite::Open;
 use crate::tabulite::Quit;
+use crate::tabulite::ScrollHalfPageDown;
+use crate::tabulite::ScrollHalfPageUp;
 use crate::tabulite::SelectFirstRow;
 use crate::tabulite::SelectLastRow;
 use crate::tabulite::SelectNextColumn;
+use crate::tabulite::SelectNextLayer;
 use crate::tabulite::SelectNextRow;
 use crate::tabulite::SelectPreviousColumn;
+use crate::tabulite::SelectPreviousLayer;
 use crate::tabulite::SelectPreviousRow;
 use crate::tabulite::ToggleFilter;
 
@@ -30,6 +34,16 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("j", SelectNextRow, Some("DataTable && !Input")),
         KeyBinding::new("g", SelectFirstRow, Some("DataTable && !Input")),
         KeyBinding::new("G", SelectLastRow, Some("DataTable && !Input")),
+        KeyBinding::new("ctrl-d", ScrollHalfPageDown, Some("DataTable && !Input")),
+        KeyBinding::new("ctrl-u", ScrollHalfPageUp, Some("DataTable && !Input")),
+        KeyBinding::new(
+            "alt-shift-h",
+            SelectPreviousLayer,
+            Some("DataTable && !Input"),
+        ),
+        KeyBinding::new("left", SelectPreviousLayer, Some("DataTable && !Input")),
+        KeyBinding::new("alt-shift-l", SelectNextLayer, Some("DataTable && !Input")),
+        KeyBinding::new("right", SelectNextLayer, Some("DataTable && !Input")),
         KeyBinding::new("/", ToggleFilter, Some("DataTable && !Input")),
         KeyBinding::new("d", ClearFilter, Some("DataTable && !Input")),
         KeyBinding::new("escape", DismissFilters, Some("DataTable && !Input")),

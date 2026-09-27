@@ -36,6 +36,15 @@ pub struct TableLayer {
 
 const NULL: &str = "null";
 pub(crate) const PAGE_SIZE: usize = 128;
+
+pub(crate) fn row_number(row_ix: usize) -> String {
+    (row_ix + 1).to_string()
+}
+
+pub(crate) fn row_number_width(row_count: usize) -> Pixels {
+    let digits = row_count.max(1).to_string().len() as f32;
+    px((digits * 8.0 + 24.0).max(40.0))
+}
 const MAX_CACHED_PAGES: usize = 8;
 const MAX_PENDING_PAGES: usize = 2;
 
@@ -84,6 +93,9 @@ impl TableLayer {
 
     pub(crate) fn set_row_count(&mut self, count: usize) {
         self.row_count = count;
+        if let Some(column) = self.columns.first_mut() {
+            column.width = row_number_width(count);
+        }
         self.data.retain(|page, _| *page < count);
         self.pending_pages.retain(|page| *page < count);
     }
@@ -97,7 +109,7 @@ impl TableLayer {
     }
 
     pub fn set_column_widths(&mut self, widths: &[Pixels]) {
-        for (column, width) in self.columns.iter_mut().zip(widths) {
+        for (column, width) in self.columns.iter_mut().skip(1).zip(widths.iter().skip(1)) {
             column.width = *width;
         }
     }
@@ -110,7 +122,7 @@ impl TableLayer {
     ) -> Entity<InputState> {
         self.filter_enabled = true;
         self.ensure_filter_inputs(window, cx);
-        self.filter_inputs[col_ix].clone()
+        self.filter_inputs[col_ix - 1].clone()
     }
 
     pub fn clear_filter(
@@ -119,7 +131,11 @@ impl TableLayer {
         window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) {
-        let Some(input) = self.filter_inputs.get(col_ix).cloned() else {
+        let Some(input) = col_ix
+            .checked_sub(1)
+            .and_then(|ix| self.filter_inputs.get(ix))
+            .cloned()
+        else {
             return;
         };
 
@@ -146,7 +162,7 @@ impl TableLayer {
             return;
         }
 
-        for _ in &self.columns {
+        for _ in 1..self.columns.len() {
             let input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter..."));
             self.input_subscriptions.push(cx.subscribe(
                 &input,
@@ -214,7 +230,7 @@ impl TableLayer {
                             if delegate.query_generation != generation {
                                 return;
                             }
-                            delegate.row_count = rows.rows.len();
+                            delegate.set_row_count(rows.rows.len());
                             delegate.store_rows(rows);
                             delegate.first_page_pending = false;
                             table_state.scroll_to_row(0, cx);
@@ -246,7 +262,7 @@ impl TableLayer {
                             if delegate.query_generation != generation {
                                 return false;
                             }
-                            delegate.row_count = initial_count;
+                            delegate.set_row_count(initial_count);
                             delegate.first_page_pending = false;
                             if initial_count > 0 {
                                 delegate.data.insert(0, rows.rows);
@@ -294,6 +310,12 @@ impl TableLayer {
             .get(&(row_ix / PAGE_SIZE * PAGE_SIZE))?
             .get(row_ix % PAGE_SIZE)
             .map(|row| row[col_ix].as_deref())
+    }
+
+    pub(crate) fn cell_badge(&self, row_ix: usize, col_ix: usize) -> Option<String> {
+        let value = self.cell(row_ix, col_ix)?;
+        let kind = self.source.as_ref()?.columns[col_ix].kind;
+        badge_label(kind, value)
     }
 
     pub(crate) fn request_range(
@@ -410,7 +432,7 @@ impl TableLayer {
         let Some(source) = &self.source else {
             return;
         };
-        self.columns = source
+        let data_columns: Vec<_> = source
             .columns
             .iter()
             .enumerate()
@@ -446,6 +468,16 @@ impl TableLayer {
                 column
             })
             .collect();
+        self.columns = vec![
+            Column::new("__tabulite_row_number", "#")
+                .fixed_left()
+                .movable(false)
+                .resizable(false)
+                .selectable(false)
+                .p_0()
+                .width(row_number_width(self.row_count)),
+        ];
+        self.columns.extend(data_columns);
 
         self.input_subscriptions.clear();
         self.filter_inputs.clear();
@@ -462,7 +494,7 @@ impl TableDelegate for TableLayer {
             self.data
                 .values()
                 .flatten()
-                .all(|row| row.len() == self.columns.len())
+                .all(|row| row.len() + 1 == self.columns.len())
         );
         self.columns.len()
     }
@@ -514,7 +546,7 @@ impl TableDelegate for TableLayer {
         _window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        if self.filter_enabled {
+        if self.filter_enabled && col_ix > 0 {
             let table_focus_handle = self.table_focus_handle.clone();
             let enter_focus_handle = table_focus_handle.clone();
             let table = cx.entity();
@@ -523,11 +555,16 @@ impl TableDelegate for TableLayer {
                 .min_w_0()
                 .h_full()
                 .child(
-                    Input::new(&self.filter_inputs.get(col_ix).expect("BUG: column index"))
-                        .w_full()
-                        .prefix(Icon::new(IconName::Search))
-                        .text_xs()
-                        .xsmall(),
+                    Input::new(
+                        &self
+                            .filter_inputs
+                            .get(col_ix - 1)
+                            .expect("BUG: column index"),
+                    )
+                    .w_full()
+                    .prefix(Icon::new(IconName::Search))
+                    .text_xs()
+                    .xsmall(),
                 )
                 .on_action(move |_: &Enter, window, cx| {
                     if let Some(focus_handle) = &enter_focus_handle {
@@ -554,6 +591,7 @@ impl TableDelegate for TableLayer {
                 .min_w_0()
                 .h_full()
                 .truncate()
+                .when(col_ix == 0, |this| this.flex().items_center().justify_end())
                 .child(self.column(col_ix, cx).name.clone())
         }
     }
@@ -605,13 +643,32 @@ impl TableDelegate for TableLayer {
         _: &mut Window,
         cx: &mut Context<'_, TableState<Self>>,
     ) -> impl IntoElement {
-        match self.cell(row_ix, col_ix) {
-            None => div(),
-            Some(None) => div()
+        if col_ix == 0 {
+            return div()
+                .flex()
+                .items_center()
+                .justify_end()
+                .size_full()
+                .pr(px(8.))
+                .bg(cx.theme().tokens.table_head)
+                .text_color(cx.theme().table_head_foreground)
+                .child(row_number(row_ix));
+        }
+        let data_ix = col_ix - 1;
+        if let Some(badge) = self.cell_badge(row_ix, data_ix) {
+            return div()
                 .flex()
                 .justify_center()
-                .child(Tag::secondary().outline().xsmall().child(NULL))
-                .text_color(cx.theme().accent),
+                .child(
+                    Tag::secondary()
+                        .outline()
+                        .xsmall()
+                        .child(SharedString::new(badge)),
+                )
+                .text_color(cx.theme().accent);
+        }
+        match self.cell(row_ix, data_ix) {
+            None | Some(None) => div(),
             Some(Some(value)) => {
                 let align = self.columns[col_ix].align;
                 div()
@@ -627,7 +684,10 @@ impl TableDelegate for TableLayer {
     }
 
     fn cell_text(&self, row_ix: usize, col_ix: usize, _: &App) -> String {
-        self.cell(row_ix, col_ix)
+        if col_ix == 0 {
+            return row_number(row_ix);
+        }
+        self.cell(row_ix, col_ix - 1)
             .flatten()
             .unwrap_or_default()
             .to_string()
@@ -640,9 +700,12 @@ impl TableDelegate for TableLayer {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) {
+        if col_ix == 0 {
+            return;
+        }
         self.sort = match sort {
-            ColumnSort::Ascending => Some((col_ix, false)),
-            ColumnSort::Descending => Some((col_ix, true)),
+            ColumnSort::Ascending => Some((col_ix - 1, false)),
+            ColumnSort::Descending => Some((col_ix - 1, true)),
             ColumnSort::Default => None,
         };
         for (ix, column) in self.columns.iter_mut().enumerate() {
@@ -653,6 +716,14 @@ impl TableDelegate for TableLayer {
             });
         }
         self.filter_data(cx);
+    }
+}
+
+fn badge_label(kind: ColumnKind, value: Option<&str>) -> Option<String> {
+    match value {
+        None => Some(NULL.to_owned()),
+        Some(size) if kind == ColumnKind::Blob => Some(format!("blob ({size})")),
+        Some(_) => None,
     }
 }
 
@@ -702,11 +773,19 @@ mod tests {
             let mut layer = TableLayer::default();
             layer.update_data(source, count, page);
             assert_eq!(layer.rows_count(), 1024);
+            assert_eq!(layer.columns_count(), 3);
+            assert_eq!(layer.columns[0].name.as_ref(), "#");
+            assert_eq!(layer.columns[1].name.as_ref(), "name");
+            assert!(!layer.columns[0].selectable);
+            assert!(layer.columns[0].paddings.is_some());
+            assert_eq!(layer.columns[0].width, row_number_width(1024));
             assert_eq!(layer.data.len(), 1);
             assert_eq!(layer.data[&0].len(), PAGE_SIZE);
             assert_eq!(layer.cell(0, 0), Some(Some("row_0")));
             assert_eq!(layer.cell(PAGE_SIZE - 1, 0), Some(Some("row_127")));
             assert_eq!(layer.cell(PAGE_SIZE, 0), None);
+            layer.set_row_count(1_000_000);
+            assert_eq!(layer.columns[0].width, row_number_width(1_000_000));
             Ok(())
         })();
         std::fs::remove_file(path).unwrap();
@@ -751,6 +830,32 @@ mod tests {
         assert!(layer.data.len() <= MAX_CACHED_PAGES);
         assert!(!layer.data.contains_key(&0));
         assert!(layer.data.contains_key(&(9 * PAGE_SIZE)));
+    }
+
+    #[test]
+    fn row_numbers_use_display_positions_across_pages() {
+        assert_eq!(row_number(0), "1");
+        assert_eq!(row_number(PAGE_SIZE), "129");
+        assert_eq!(row_number(1_000_000), "1000001");
+        assert_eq!(row_number_width(0), px(40.0));
+        assert_eq!(row_number_width(129), px(48.0));
+        assert_eq!(row_number_width(1_000_000), px(80.0));
+        assert_eq!(row_number_width(1_000_000_000), px(104.0));
+    }
+
+    #[test]
+    fn badges_distinguish_blobs_from_null_and_text() {
+        assert_eq!(
+            badge_label(ColumnKind::Blob, Some("3 B")),
+            Some("blob (3 B)".into())
+        );
+        assert_eq!(
+            badge_label(ColumnKind::Blob, Some("1.5 MB")),
+            Some("blob (1.5 MB)".into())
+        );
+        assert_eq!(badge_label(ColumnKind::Blob, None), Some("null".into()));
+        assert_eq!(badge_label(ColumnKind::Text, None), Some("null".into()));
+        assert_eq!(badge_label(ColumnKind::Text, Some("3 B")), None);
     }
 
     #[test]
