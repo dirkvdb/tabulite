@@ -13,6 +13,8 @@ use gpui_kit::SharedString;
 
 use crate::excel;
 
+pub const ANY_COLUMN: usize = usize::MAX;
+
 #[derive(Clone)]
 pub struct TableData {
     connection: Arc<Mutex<Connection>>,
@@ -219,32 +221,80 @@ pub fn layer_data(path: &Path, layer: &str) -> Result<TableData> {
 
 impl TableData {
     pub fn count(&self, filters: &[(usize, String)]) -> Result<usize> {
-        let where_clause = self.where_clause(filters);
+        let (where_clause, params) = self.where_clause(filters);
         let sql = format!("SELECT count(*) FROM data {where_clause}");
         let conn = self.connection.lock().expect("DuckDB connection poisoned");
-        let count: i64 = conn.query_row(
-            &sql,
-            params_from_iter(filters.iter().map(|(_, value)| value)),
-            |row| row.get(0),
-        )?;
+        let count: i64 = conn.query_row(&sql, params_from_iter(&params), |row| row.get(0))?;
         Ok(usize::try_from(count)?)
     }
 
-    fn where_clause(&self, filters: &[(usize, String)]) -> String {
-        if filters.is_empty() {
-            return String::new();
-        }
+    fn where_clause(&self, filters: &[(usize, String)]) -> (String, Vec<String>) {
+        let mut params = Vec::new();
         let conditions = filters
             .iter()
-            .map(|(ix, _)| {
-                format!(
-                    "contains(lower(CAST({} AS VARCHAR)), lower(?))",
-                    quoted(&self.columns[*ix].name)
-                )
+            .map(|(ix, value)| {
+                if *ix == ANY_COLUMN {
+                    let columns = self
+                        .columns
+                        .iter()
+                        .map(|column| {
+                            params.push(value.clone());
+                            format!(
+                                "contains(lower(CAST({} AS VARCHAR)), lower(?))",
+                                quoted(&column.name)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" OR ");
+                    return if columns.is_empty() {
+                        "FALSE".into()
+                    } else {
+                        format!("({columns})")
+                    };
+                }
+                let column = &self.columns[*ix];
+                let name = quoted(&column.name);
+                for op in [">=", "<=", "<>", "=", ">", "<"] {
+                    if let Some(operand) = value.strip_prefix(op) {
+                        let typed = matches!(
+                            column.kind,
+                            ColumnKind::Number | ColumnKind::Float | ColumnKind::Temporal
+                        );
+                        params.push(if typed || !matches!(op, "=" | "<>") {
+                            operand.trim_start().to_owned()
+                        } else {
+                            operand.to_owned()
+                        });
+                        return if typed {
+                            format!("{name} {op} TRY(cast_to_type(?, {name}))")
+                        } else {
+                            format!("CAST({name} AS VARCHAR) {op} ?")
+                        };
+                    }
+                }
+                if matches!(column.kind, ColumnKind::Number | ColumnKind::Float) {
+                    if let Some((start, end)) = value.split_once('~') {
+                        params.extend([start.trim().to_owned(), end.trim().to_owned()]);
+                        return format!(
+                            "{name} BETWEEN TRY(cast_to_type(?, {name})) AND TRY(cast_to_type(?, {name}))"
+                        );
+                    }
+                }
+                // LIKE treats '_' as a wildcard; only '%' is special in user input.
+                let pattern = value.replace('\\', "\\\\").replace('_', "\\_");
+                params.push(if value.contains('%') {
+                    pattern
+                } else {
+                    format!("%{pattern}%")
+                });
+                format!("lower(CAST({name} AS VARCHAR)) LIKE lower(?) ESCAPE '\\'")
             })
-            .collect::<Vec<_>>()
-            .join(" AND ");
-        format!("WHERE {conditions}")
+            .collect::<Vec<_>>();
+        if conditions.is_empty() {
+            (String::new(), params)
+        } else {
+            (format!("WHERE {}", conditions.join(" AND ")), params)
+        }
     }
 
     pub fn query_page(
@@ -284,7 +334,7 @@ impl TableData {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        let where_clause = self.where_clause(filters);
+        let (where_clause, filter_params) = self.where_clause(filters);
         let order = match sort {
             Some((ix, descending)) => {
                 // Page boundaries must not depend on the execution order of equal sort keys.
@@ -318,9 +368,9 @@ impl TableData {
         let sql = format!("SELECT {select} FROM data {where_clause} {order} {paging}");
         let limit = page.map(|(_, limit)| i64::try_from(limit)).transpose()?;
         let offset = page.map(|(offset, _)| i64::try_from(offset)).transpose()?;
-        let mut params: Vec<&dyn duckdb::ToSql> = filters
+        let mut params: Vec<&dyn duckdb::ToSql> = filter_params
             .iter()
-            .map(|(_, value)| value as &dyn duckdb::ToSql)
+            .map(|value| value as &dyn duckdb::ToSql)
             .collect();
         if let (Some(limit), Some(offset)) = (&limit, &offset) {
             params.extend([limit as &dyn duckdb::ToSql, offset as &dyn duckdb::ToSql]);
@@ -751,6 +801,140 @@ mod tests {
                 vec![row]
             );
         }
+    }
+
+    fn filter_table() -> TableData {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE data (\"a\"\"b\" VARCHAR, note VARCHAR, amount BIGINT, price DOUBLE, day DATE); \
+             INSERT INTO data VALUES \
+             ('Alpha', 'first', 2, 1.5, DATE '2024-01-01'), \
+             ('a_b', 'second', 10, 2.5, DATE '2024-03-01'), \
+             ('Bob', 'alpha', 5, 3.5, DATE '2024-02-01'), \
+             ('b%', 'percent', 1, 4.5, DATE '2023-12-01'), \
+             ('x\\back', 'slash', 9007199254740993, 5.5, DATE '2025-01-01'), \
+             (NULL, NULL, NULL, NULL, NULL)",
+        )
+        .unwrap();
+        TableData {
+            connection: Arc::new(Mutex::new(conn)),
+            loading_mode: LoadingMode::Paged,
+            columns: [
+                ("a\"b", ColumnKind::Text),
+                ("note", ColumnKind::Text),
+                ("amount", ColumnKind::Number),
+                ("price", ColumnKind::Float),
+                ("day", ColumnKind::Temporal),
+            ]
+            .into_iter()
+            .map(|(name, kind)| TableColumn {
+                name: name.into(),
+                kind,
+            })
+            .collect(),
+        }
+    }
+
+    fn assert_filtered(table: &TableData, filters: &[(usize, String)], expected: &[&str]) {
+        let rows = table.query_all(filters, Some((0, false))).unwrap().rows;
+        let names = rows
+            .iter()
+            .map(|row| row[0].as_deref().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(names, expected, "filters: {filters:?}");
+        assert_eq!(table.count(filters).unwrap(), expected.len());
+        let pages = (0..=expected.len())
+            .flat_map(|offset| {
+                table
+                    .query_page(filters, Some((0, false)), offset, 1)
+                    .unwrap()
+                    .rows
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(pages, rows, "filters: {filters:?}");
+    }
+
+    #[test]
+    fn wildcard_filters_escape_underscores_and_backslashes() {
+        let table = filter_table();
+        for (filter, expected) in [
+            ("alp", vec!["Alpha"]),
+            ("A%", vec!["Alpha", "a_b"]),
+            ("%b", vec!["Bob", "a_b"]),
+            ("%b%", vec!["Bob", "a_b", "b%", "x\\back"]),
+            ("a_%", vec!["a_b"]),
+            ("%\\back", vec!["x\\back"]),
+            ("b%", vec!["Bob", "b%"]),
+            ("%", vec!["Alpha", "Bob", "a_b", "b%", "x\\back"]),
+        ] {
+            assert_filtered(&table, &[(0, filter.into())], &expected);
+        }
+    }
+
+    #[test]
+    fn exact_filters_are_case_sensitive_and_keep_wildcards_literal() {
+        let table = filter_table();
+        for (filter, expected) in [
+            ("=Alpha", vec!["Alpha"]),
+            ("=alpha", vec![]),
+            ("=b%", vec!["b%"]),
+            ("<>Alpha", vec!["Bob", "a_b", "b%", "x\\back"]),
+            ("<>b%", vec!["Alpha", "Bob", "a_b", "x\\back"]),
+            ("=' OR 1=1 --", vec![]),
+        ] {
+            assert_filtered(&table, &[(0, filter.into())], &expected);
+        }
+    }
+
+    #[test]
+    fn numeric_and_temporal_filters_use_native_order_and_tolerate_partial_input() {
+        let table = filter_table();
+        for (column, filter, expected) in [
+            (2, ">5", vec!["a_b", "x\\back"]),
+            (2, "=5", vec!["Bob"]),
+            (2, "<>5", vec!["Alpha", "a_b", "b%", "x\\back"]),
+            (2, "<=5", vec!["Alpha", "Bob", "b%"]),
+            (2, "<2", vec!["b%"]),
+            (2, ">=9007199254740993", vec!["x\\back"]),
+            (2, ">9007199254740992", vec!["x\\back"]),
+            (2, "9007199254740993~9007199254740993", vec!["x\\back"]),
+            (2, "1~5", vec!["Alpha", "Bob", "b%"]),
+            (2, "2~", vec![]),
+            (2, ">-", vec![]),
+            (3, ">2", vec!["Bob", "a_b", "b%", "x\\back"]),
+            (3, "=2.50", vec!["a_b"]),
+            (3, "1.5~2.5", vec!["Alpha", "a_b"]),
+            (4, ">=2024-02-01", vec!["Bob", "a_b", "x\\back"]),
+            (4, "<2024-01-01", vec!["b%"]),
+            (4, "=2024-02-01", vec!["Bob"]),
+            (4, ">2024-", vec![]),
+            (0, ">Alpha", vec!["Bob", "a_b", "b%", "x\\back"]),
+        ] {
+            assert_filtered(&table, &[(column, filter.into())], &expected);
+        }
+    }
+
+    #[test]
+    fn multiple_columns_and_any_column_words_compose_with_and() {
+        let table = filter_table();
+        assert_filtered(&table, &[(0, "b%".into()), (2, ">=5".into())], &["Bob"]);
+        assert_filtered(&table, &[(ANY_COLUMN, "ALP".into())], &["Alpha", "Bob"]);
+        assert_filtered(
+            &table,
+            &[(ANY_COLUMN, "alp".into()), (ANY_COLUMN, "first".into())],
+            &["Alpha"],
+        );
+        assert_filtered(
+            &table,
+            &[(ANY_COLUMN, "%".into()), (1, "=percent".into())],
+            &["b%"],
+        );
+        assert_filtered(&table, &[(ANY_COLUMN, "a_b".into())], &["a_b"]);
+        assert_filtered(&table, &[(ANY_COLUMN, "' OR 1=1 --".into())], &[]);
+        assert_filtered(&table, &[(0, "%' OR 1=1 --".into())], &[]);
+        assert_filtered(&table, &[(0, "=NULL".into())], &[]);
+        assert_filtered(&table, &[(2, "1~5' OR 1=1 --".into())], &[]);
+        assert_eq!(table.count(&[]).unwrap(), 6);
     }
 
     #[test]

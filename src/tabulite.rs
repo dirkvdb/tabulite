@@ -14,6 +14,7 @@ actions!(
         Quit,
         ScrollHalfPageDown,
         ScrollHalfPageUp,
+        SelectFirstDataColumn,
         SelectFirstRow,
         SelectLastRow,
         SelectNextColumn,
@@ -22,6 +23,7 @@ actions!(
         SelectPreviousColumn,
         SelectPreviousLayer,
         SelectPreviousRow,
+        ToggleAnyFilter,
         ToggleFilter,
     ]
 );
@@ -37,6 +39,12 @@ impl Tabulite {
         cx.on_action(move |_: &Open, cx| {
             log::warn!("Open shortcut received");
             let _ = weak_view.update(cx, |view, cx| view.open_file(cx));
+        });
+        let weak_view = view.downgrade();
+        cx.on_action(move |_: &SelectFirstDataColumn, cx| {
+            let _ = weak_view.update(cx, |view, cx| {
+                view.table.update(cx, TableView::select_first_data_column);
+            });
         });
         let weak_view = view.downgrade();
         cx.on_action(move |_: &SelectPreviousColumn, cx| {

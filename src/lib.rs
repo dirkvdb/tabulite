@@ -6,6 +6,7 @@ use crate::tabulite::Open;
 use crate::tabulite::Quit;
 use crate::tabulite::ScrollHalfPageDown;
 use crate::tabulite::ScrollHalfPageUp;
+use crate::tabulite::SelectFirstDataColumn;
 use crate::tabulite::SelectFirstRow;
 use crate::tabulite::SelectLastRow;
 use crate::tabulite::SelectNextColumn;
@@ -14,6 +15,7 @@ use crate::tabulite::SelectNextRow;
 use crate::tabulite::SelectPreviousColumn;
 use crate::tabulite::SelectPreviousLayer;
 use crate::tabulite::SelectPreviousRow;
+use crate::tabulite::ToggleAnyFilter;
 use crate::tabulite::ToggleFilter;
 
 pub mod appconfig;
@@ -30,6 +32,13 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("h", SelectPreviousColumn, Some("DataTable && !Input")),
         KeyBinding::new("l", SelectNextColumn, Some("DataTable && !Input")),
+        KeyBinding::new("tab", SelectNextColumn, Some("DataTable && !Input")),
+        KeyBinding::new(
+            "shift-tab",
+            SelectPreviousColumn,
+            Some("DataTable && !Input"),
+        ),
+        KeyBinding::new("home", SelectFirstDataColumn, Some("DataTable && !Input")),
         KeyBinding::new("k", SelectPreviousRow, Some("DataTable && !Input")),
         KeyBinding::new("j", SelectNextRow, Some("DataTable && !Input")),
         KeyBinding::new("g", SelectFirstRow, Some("DataTable && !Input")),
@@ -45,6 +54,9 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("alt-shift-l", SelectNextLayer, Some("DataTable && !Input")),
         KeyBinding::new("right", SelectNextLayer, Some("DataTable && !Input")),
         KeyBinding::new("/", ToggleFilter, Some("DataTable && !Input")),
+        KeyBinding::new("ctrl-f", ToggleFilter, Some("DataTable && !Input")),
+        KeyBinding::new("g /", ToggleAnyFilter, Some("DataTable && !Input")),
+        KeyBinding::new("ctrl-shift-f", ToggleAnyFilter, Some("DataTable && !Input")),
         KeyBinding::new("d", ClearFilter, Some("DataTable && !Input")),
         KeyBinding::new("escape", DismissFilters, Some("DataTable && !Input")),
         #[cfg(target_os = "macos")]

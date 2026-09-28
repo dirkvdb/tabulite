@@ -1,4 +1,6 @@
+use gpui_kit::component::input::{Escape, Input};
 use gpui_kit::component::kbd::Kbd;
+use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarAxis};
 use gpui_kit::component::tab::{Tab, TabBar};
@@ -12,8 +14,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::{ops::Range, path::PathBuf};
 
-use crate::tablelayer::{PAGE_SIZE, TableLayer, row_number};
-use crate::tabulite::{ClearFilter, DismissFilters, ToggleFilter};
+use crate::tablelayer::{PAGE_SIZE, TableLayer, cell_filter_menu, row_number};
+use crate::tabulite::{ClearFilter, DismissFilters, ToggleAnyFilter, ToggleFilter};
 use crate::{
     tableio::{self, LoadingMode},
     utils,
@@ -111,22 +113,32 @@ impl TableView {
         cx.notify();
     }
 
-    pub(crate) fn select_previous_column(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn select_first_data_column(&mut self, cx: &mut Context<Self>) {
         self.table.update(cx, |table, cx| {
-            let columns_count = table.delegate().columns_count();
-            if columns_count <= 1 {
+            if table.delegate().columns_count() <= 1 {
                 return;
             }
+            let row = table
+                .selected_cell()
+                .map(|(row, _)| row)
+                .or_else(|| table.selected_row())
+                .unwrap_or(0);
+            table.delegate_mut().set_selected_col(1);
+            table.set_selection(TableSelection::Cell(row, 1), cx);
+        });
+    }
 
+    pub(crate) fn select_previous_column(&mut self, cx: &mut Context<Self>) {
+        self.table.update(cx, |table, cx| {
             let selected = table
                 .selected_cell()
                 .map(|(_, col)| col)
                 .or_else(|| table.selected_col())
                 .unwrap_or(1);
-            let selected = if selected <= 1 {
-                columns_count - 1
-            } else {
-                selected - 1
+            let Some(selected) =
+                adjacent_data_column(selected, table.delegate().columns_count(), false)
+            else {
+                return;
             };
             let row = table.selected_cell().map_or(0, |(row, _)| row);
             table.delegate_mut().set_selected_col(selected);
@@ -136,20 +148,15 @@ impl TableView {
 
     pub(crate) fn select_next_column(&mut self, cx: &mut Context<Self>) {
         self.table.update(cx, |table, cx| {
-            let columns_count = table.delegate().columns_count();
-            if columns_count <= 1 {
-                return;
-            }
-
             let selected = table
                 .selected_cell()
                 .map(|(_, col)| col)
                 .or_else(|| table.selected_col())
                 .unwrap_or(0);
-            let selected = if selected + 1 < columns_count {
-                selected + 1
-            } else {
-                1
+            let Some(selected) =
+                adjacent_data_column(selected, table.delegate().columns_count(), true)
+            else {
+                return;
             };
             let row = table.selected_cell().map_or(0, |(row, _)| row);
             table.delegate_mut().set_selected_col(selected);
@@ -174,7 +181,8 @@ impl TableView {
                         .selected_cell()
                         .map(|(_, col)| col)
                         .or_else(|| table.selected_col())
-                        .unwrap_or(0);
+                        .unwrap_or(1)
+                        .max(1);
                     table.set_selection(TableSelection::Cell(selected, col), cx);
                     table
                         .vertical_scroll_handle
@@ -212,7 +220,8 @@ impl TableView {
                 .selected_cell()
                 .map(|(_, col)| col)
                 .or_else(|| table.selected_col())
-                .unwrap_or(0);
+                .unwrap_or(1)
+                .max(1);
             table.set_selection(
                 TableSelection::Cell(selected.checked_sub(1).unwrap_or(rows_count - 1), col),
                 cx,
@@ -236,7 +245,8 @@ impl TableView {
                 .selected_cell()
                 .map(|(_, col)| col)
                 .or_else(|| table.selected_col())
-                .unwrap_or(0);
+                .unwrap_or(1)
+                .max(1);
             table.set_selection(TableSelection::Cell(selected, col), cx);
         });
     }
@@ -248,7 +258,8 @@ impl TableView {
                     .selected_cell()
                     .map(|(_, col)| col)
                     .or_else(|| table.selected_col())
-                    .unwrap_or(0);
+                    .unwrap_or(1)
+                    .max(1);
                 table.set_selection(TableSelection::Cell(0, col), cx);
             }
         });
@@ -262,7 +273,8 @@ impl TableView {
                     .selected_cell()
                     .map(|(_, col)| col)
                     .or_else(|| table.selected_col())
-                    .unwrap_or(0);
+                    .unwrap_or(1)
+                    .max(1);
                 table.set_selection(TableSelection::Cell(rows_count - 1, col), cx);
             }
         });
@@ -270,16 +282,18 @@ impl TableView {
 
     pub(crate) fn focus_selected_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.table.update(cx, |table, cx| {
-            let Some(col_ix) = table
+            let selected_col = table
                 .selected_cell()
                 .map(|(_, col)| col)
-                .or_else(|| table.selected_col())
-                .filter(|ix| *ix > 0)
-            else {
+                .or_else(|| table.selected_col());
+            if table.delegate().columns_count() <= 1 {
                 return;
-            };
-
+            }
+            let col_ix = selected_col
+                .filter(|ix| *ix > 0 && *ix < table.delegate().columns_count())
+                .unwrap_or(1);
             let input = table.delegate_mut().filter_input(col_ix, window, cx);
+            table.refresh_header_layout(cx);
             table.refresh(cx);
             cx.notify();
             input.update(cx, |input, cx| input.focus(window, cx));
@@ -288,6 +302,21 @@ impl TableView {
 
     fn on_action_filter(&mut self, _: &ToggleFilter, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_selected_filter(window, cx);
+    }
+
+    fn on_action_any_filter(
+        &mut self,
+        _: &ToggleAnyFilter,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.table.update(cx, |table, cx| {
+            let input = table.delegate_mut().any_filter_input(window, cx);
+            table.refresh_header_layout(cx);
+            table.refresh(cx);
+            cx.notify();
+            input.update(cx, |input, cx| input.focus(window, cx));
+        });
     }
 
     fn on_action_clear_filter(
@@ -478,9 +507,13 @@ impl TableView {
     ) -> impl IntoElement {
         let column_count = self.table.read(cx).delegate().columns_count();
         let filter_inputs = self.table.update(cx, |table, cx| {
-            (1..column_count)
-                .map(|ix| table.delegate_mut().filter_input(ix, window, cx))
-                .collect::<Vec<_>>()
+            if table.delegate().filters_visible() {
+                (1..column_count)
+                    .map(|ix| table.delegate_mut().filter_input(ix, window, cx))
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            }
         });
         let state = self.table.read(cx);
         let delegate = state.delegate();
@@ -492,7 +525,7 @@ impl TableView {
                 .text_right()
                 .child("#"),
         );
-        for (data_ix, input) in filter_inputs.into_iter().enumerate() {
+        for data_ix in 0..column_count.saturating_sub(1) {
             let ix = data_ix + 1;
             let column = delegate.column(ix, cx);
             let table = self.table.clone();
@@ -516,15 +549,11 @@ impl TableView {
                         state.delegate_mut().perform_sort(ix, next, window, cx);
                     });
                 });
-            header = header.child(
-                TableHead::new().w(column.width).child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .child(title)
-                        .child(gpui_kit::component::input::Input::new(&input).xsmall()),
-                ),
-            );
+            let mut header_content = div().flex().flex_col().child(title);
+            if let Some(input) = filter_inputs.get(data_ix) {
+                header_content = header_content.child(Input::new(input).xsmall());
+            }
+            header = header.child(TableHead::new().w(column.width).child(header_content));
         }
         let mut body = TableBody::new();
         for row_ix in 0..delegate.rows_count() {
@@ -573,15 +602,30 @@ impl TableView {
                         .into_any_element()
                 };
                 let table = self.table.clone();
-                let mut cell = TableCell::new().w(column.width).child(
-                    div()
-                        .id(("eager-cell", row_ix * column_count + col_ix))
-                        .size_full()
-                        .child(content)
-                        .on_click(move |_, _, cx| {
-                            table.update(cx, |state, cx| state.set_selected_row(row_ix, cx));
-                        }),
-                );
+                let value = if badge.is_none() {
+                    delegate.cell(row_ix, data_ix).flatten().map(str::to_owned)
+                } else {
+                    None
+                };
+                let generation = delegate.generation();
+                let cell_content = div()
+                    .id(("eager-cell", row_ix * column_count + col_ix))
+                    .size_full()
+                    .child(content)
+                    .on_click(move |_, _, cx| {
+                        table.update(cx, |state, cx| state.set_selected_row(row_ix, cx));
+                    });
+                let cell_content = if let Some(value) = value {
+                    let table = self.table.clone();
+                    cell_content
+                        .context_menu(move |menu, _, _| {
+                            cell_filter_menu(menu, table.clone(), col_ix, value.clone(), generation)
+                        })
+                        .into_any_element()
+                } else {
+                    cell_content.into_any_element()
+                };
+                let mut cell = TableCell::new().w(column.width).child(cell_content);
                 if badge.is_some() || column.align == TextAlign::Center {
                     cell = cell.text_center();
                 } else if column.align == TextAlign::Right {
@@ -599,6 +643,7 @@ impl TableView {
             .key_context("DataTable")
             .track_focus(&self.table.focus_handle(cx))
             .on_action(cx.listener(Self::on_action_filter))
+            .on_action(cx.listener(Self::on_action_any_filter))
             .on_action(cx.listener(Self::on_action_clear_filter))
             .on_action(cx.listener(Self::on_action_dismiss_filters))
             .child(
@@ -631,6 +676,7 @@ impl TableView {
             .size_full()
             .child(DataTable::new(&self.table).xsmall())
             .on_action(cx.listener(Self::on_action_filter))
+            .on_action(cx.listener(Self::on_action_any_filter))
             .on_action(cx.listener(Self::on_action_clear_filter))
             .on_action(cx.listener(Self::on_action_dismiss_filters))
             .on_prepaint(move |bounds, _, cx| {
@@ -642,6 +688,23 @@ impl TableView {
                 });
             })
     }
+}
+
+fn adjacent_data_column(selected: usize, column_count: usize, forward: bool) -> Option<usize> {
+    if column_count <= 1 {
+        return None;
+    }
+    Some(if forward {
+        if selected < column_count - 1 {
+            selected + 1
+        } else {
+            1
+        }
+    } else if selected <= 1 {
+        column_count - 1
+    } else {
+        selected - 1
+    })
 }
 
 fn half_page_move(
@@ -675,7 +738,19 @@ fn half_page_move(
 
 #[cfg(test)]
 mod tests {
-    use super::half_page_move;
+    use super::{adjacent_data_column, half_page_move};
+
+    #[test]
+    fn column_navigation_skips_row_numbers_in_both_directions() {
+        assert_eq!(adjacent_data_column(0, 3, true), Some(1));
+        assert_eq!(adjacent_data_column(1, 3, true), Some(2));
+        assert_eq!(adjacent_data_column(2, 3, true), Some(1));
+        assert_eq!(adjacent_data_column(1, 3, false), Some(2));
+        assert_eq!(adjacent_data_column(2, 3, false), Some(1));
+        assert_eq!(adjacent_data_column(1, 2, true), Some(1));
+        assert_eq!(adjacent_data_column(1, 2, false), Some(1));
+        assert_eq!(adjacent_data_column(0, 1, true), None);
+    }
 
     #[test]
     fn half_page_navigation_moves_selection_and_viewport_without_wrapping() {
@@ -724,8 +799,35 @@ impl Render for TableView {
             tab_bar = tab_bar.child(Tab::new().label(layer.clone()));
         }
 
+        let any_filter_visible = self.table.read(cx).delegate().any_filter_visible();
+
         v_flex()
             .size_full()
+            .when(any_filter_visible, |this| {
+                let any_filter = self.table.update(cx, |table, cx| {
+                    table.delegate_mut().any_filter_input(window, cx)
+                });
+                let table = self.table.clone();
+                this.child(
+                    h_flex()
+                        .gap_2()
+                        .p_2()
+                        .child("Filter in any column")
+                        .child(
+                            div()
+                                .w(px(320.))
+                                .child(Input::new(&any_filter).w_full().xsmall()),
+                        )
+                        .on_action(move |_: &Escape, window, cx| {
+                            table.update(cx, |state, cx| {
+                                if state.delegate_mut().hide_filters_if_empty(cx) {
+                                    state.refresh_header_layout(cx);
+                                }
+                                state.focus_handle(cx).focus(window, cx);
+                            });
+                        }),
+                )
+            })
             .child(div().flex_1().size_full().child(match self.loading_mode {
                 LoadingMode::Eager => self.render_eager_content(window, cx).into_any_element(),
                 LoadingMode::Paged => self.render_tab_content(window, cx).into_any_element(),

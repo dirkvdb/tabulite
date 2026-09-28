@@ -1,4 +1,4 @@
-use crate::tableio::{ColumnKind, LoadingMode, TableData, TableRows};
+use crate::tableio::{ANY_COLUMN, ColumnKind, LoadingMode, TableData, TableRows};
 use std::{
     collections::{HashMap, HashSet},
     ops::Range,
@@ -8,6 +8,7 @@ use std::{
 use gpui_kit::component::{
     ActiveTheme, Icon, IconName, Sizable, Size, StyleSized,
     input::{Enter, Escape, Input, InputEvent, InputState},
+    menu::{ContextMenuExt, PopupMenu, PopupMenuItem},
     table::{Column, ColumnGroup, ColumnSort, TableDelegate, TableState},
     tag::Tag,
 };
@@ -28,6 +29,8 @@ pub struct TableLayer {
     query_generation: u64,
     filter_enabled: bool,
     filter_inputs: Vec<Entity<InputState>>,
+    any_filter_visible: bool,
+    any_filter_input: Option<Entity<InputState>>,
     input_subscriptions: Vec<Subscription>,
     columns: Vec<Column>,
     table_focus_handle: Option<FocusHandle>,
@@ -48,6 +51,48 @@ pub(crate) fn row_number_width(row_count: usize) -> Pixels {
 const MAX_CACHED_PAGES: usize = 8;
 const MAX_PENDING_PAGES: usize = 2;
 
+pub(crate) fn cell_filter_menu(
+    mut menu: PopupMenu,
+    table: Entity<TableState<TableLayer>>,
+    col_ix: usize,
+    value: String,
+    generation: u64,
+) -> PopupMenu {
+    for (label, expression) in [
+        ("Use as Exact Filter", format!("={value}")),
+        ("Use in Filter Expression: not equal", format!("<>{value}")),
+        (
+            "Use in Filter Expression: greater than",
+            format!(">{value}"),
+        ),
+        (
+            "Use in Filter Expression: greater or equal",
+            format!(">={value}"),
+        ),
+        ("Use in Filter Expression: less than", format!("<{value}")),
+        (
+            "Use in Filter Expression: less or equal",
+            format!("<={value}"),
+        ),
+    ] {
+        let table = table.clone();
+        menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+            table.update(cx, |state, cx| {
+                if state.delegate().generation() != generation {
+                    return;
+                }
+                let input = state.delegate_mut().filter_input(col_ix, window, cx);
+                input.update(cx, |input, cx| {
+                    input.set_value(expression.clone(), window, cx)
+                });
+                state.delegate_mut().filter_data(cx);
+                state.refresh_header_layout(cx);
+            });
+        }));
+    }
+    menu
+}
+
 impl TableLayer {
     pub fn update_data(&mut self, data: TableData, row_count: usize, first_page: TableRows) {
         let eager = data.loading_mode == LoadingMode::Eager;
@@ -64,6 +109,8 @@ impl TableLayer {
         self.visible_start = 0;
         self.visible_end = 0;
         self.filters.clear();
+        self.filter_enabled = false;
+        self.any_filter_visible = false;
         self.sort = None;
         self.query_generation += 1;
         self.create_column_info();
@@ -85,6 +132,14 @@ impl TableLayer {
 
     pub fn rows_count(&self) -> usize {
         self.row_count
+    }
+
+    pub fn filters_visible(&self) -> bool {
+        self.filter_enabled
+    }
+
+    pub fn any_filter_visible(&self) -> bool {
+        self.any_filter_visible
     }
 
     pub(crate) fn generation(&self) -> u64 {
@@ -125,6 +180,28 @@ impl TableLayer {
         self.filter_inputs[col_ix - 1].clone()
     }
 
+    pub fn any_filter_input(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> Entity<InputState> {
+        self.filter_enabled = true;
+        self.any_filter_visible = true;
+        if let Some(input) = &self.any_filter_input {
+            return input.clone();
+        }
+        let input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Filter in any column (words)"));
+        self.input_subscriptions
+            .push(cx.subscribe(&input, |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.delegate_mut().filter_data(cx);
+                }
+            }));
+        self.any_filter_input = Some(input.clone());
+        input
+    }
+
     pub fn clear_filter(
         &mut self,
         col_ix: usize,
@@ -149,11 +226,16 @@ impl TableLayer {
                 .filter_inputs
                 .iter()
                 .any(|input| !input.read(cx).value().is_empty())
+            || self
+                .any_filter_input
+                .as_ref()
+                .is_some_and(|input| !input.read(cx).value().is_empty())
         {
             return false;
         }
 
         self.filter_enabled = false;
+        self.any_filter_visible = false;
         true
     }
 
@@ -176,7 +258,7 @@ impl TableLayer {
     }
 
     fn filter_data(&mut self, cx: &mut Context<TableState<Self>>) {
-        let filters = self
+        let mut filters: Vec<_> = self
             .filter_inputs
             .iter()
             .enumerate()
@@ -185,6 +267,15 @@ impl TableLayer {
                 (!text.is_empty()).then_some((ix, text))
             })
             .collect();
+        if let Some(input) = &self.any_filter_input {
+            filters.extend(
+                input
+                    .read(cx)
+                    .value()
+                    .split_whitespace()
+                    .map(|word| (ANY_COLUMN, word.to_owned())),
+            );
+        }
         self.refresh_data(filters, cx);
     }
 
@@ -481,6 +572,7 @@ impl TableLayer {
 
         self.input_subscriptions.clear();
         self.filter_inputs.clear();
+        self.any_filter_input = None;
     }
 }
 
@@ -592,7 +684,9 @@ impl TableDelegate for TableLayer {
                 .h_full()
                 .truncate()
                 .when(col_ix == 0, |this| this.flex().items_center().justify_end())
-                .child(self.column(col_ix, cx).name.clone())
+                .when(!self.filter_enabled || col_ix != 0, |this| {
+                    this.child(self.column(col_ix, cx).name.clone())
+                })
         }
     }
 
@@ -633,7 +727,13 @@ impl TableDelegate for TableLayer {
                 this.bg(cx.theme().tokens.table_active)
                     .text_color(cx.theme().foreground)
             })
-            .child(div().w_full().truncate().child(label.clone()))
+            .child(
+                div()
+                    .w_full()
+                    .truncate()
+                    .when(label == &self.columns[0].name, |this| this.text_right())
+                    .child(label.clone()),
+            )
     }
 
     fn render_td(
@@ -652,7 +752,8 @@ impl TableDelegate for TableLayer {
                 .pr(px(8.))
                 .bg(cx.theme().tokens.table_head)
                 .text_color(cx.theme().table_head_foreground)
-                .child(row_number(row_ix));
+                .child(row_number(row_ix))
+                .into_any_element();
         }
         let data_ix = col_ix - 1;
         if let Some(badge) = self.cell_badge(row_ix, data_ix) {
@@ -665,20 +766,29 @@ impl TableDelegate for TableLayer {
                         .xsmall()
                         .child(SharedString::new(badge)),
                 )
-                .text_color(cx.theme().accent);
+                .text_color(cx.theme().accent)
+                .into_any_element();
         }
         match self.cell(row_ix, data_ix) {
-            None | Some(None) => div(),
+            None | Some(None) => div().into_any_element(),
             Some(Some(value)) => {
                 let align = self.columns[col_ix].align;
+                let table = cx.entity();
+                let generation = self.generation();
+                let value = value.to_owned();
                 div()
+                    .id(("filter-cell", row_ix * self.columns.len() + col_ix))
                     .flex()
                     .items_center()
                     .size_full()
                     .truncate()
                     .when(align == TextAlign::Center, |this| this.justify_center())
                     .when(align == TextAlign::Right, |this| this.justify_end())
-                    .child(SharedString::new(value))
+                    .child(SharedString::new(value.clone()))
+                    .context_menu(move |menu, _, _| {
+                        cell_filter_menu(menu, table.clone(), col_ix, value.clone(), generation)
+                    })
+                    .into_any_element()
             }
         }
     }
