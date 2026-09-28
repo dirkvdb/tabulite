@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
-"""Generate reusable test fixtures; leave existing files untouched.
+"""Generate reusable test fixtures; leave existing files untouched."""
 
-Use --tests-only to omit the multi-gigabyte development fixtures.
-"""
 
-import argparse
 import os
 import sqlite3
 import subprocess
@@ -189,13 +186,9 @@ FROM range(1, 300001) t(i);
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tests-only", action="store_true", help="omit multi-gigabyte development fixtures")
-    args = parser.parse_args()
     generate_test_fixtures()
-    if not args.tests_only:
-        ensure(LARGE_FILES / "large-test.db", lambda path: write_duckdb_sqlite(path, LARGE_DB_SQL))
-        ensure(LARGE_FILES / "large-test-columns.db", lambda path: write_duckdb_sqlite(path, WIDE_DB_SQL))
+    ensure(LARGE_FILES / "large-test.db", lambda path: write_duckdb_sqlite(path, LARGE_DB_SQL))
+    ensure(LARGE_FILES / "large-test-columns.db", lambda path: write_duckdb_sqlite(path, WIDE_DB_SQL))
 
 
 if __name__ == "__main__":

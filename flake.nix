@@ -46,6 +46,7 @@
               pkgs.pkg-config
               pkgs.makeWrapper
               pkgs.imagemagick
+              duckdb
             ];
             buildInputs = [
               duckdb.lib
