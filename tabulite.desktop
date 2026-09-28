@@ -6,5 +6,5 @@ Icon=tabulite
 Terminal=false
 Type=Application
 Categories=Office;Spreadsheet;
-MimeType=text/csv;application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;
+MimeType=text/csv;text/tab-separated-values;application/vnd.apache.parquet;application/json;application/x-ndjson;application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;application/vnd.sqlite3;application/x-sqlite3;application/geopackage+sqlite3;
 StartupNotify=true
