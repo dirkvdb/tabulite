@@ -277,9 +277,35 @@ pub fn layer_data(path: &Path, layer: &str) -> Result<TableData> {
     })
 }
 
+// A closing slash escaped by an odd number of backslashes is part of the pattern.
+fn regex_pattern(value: &str) -> Option<&str> {
+    let pattern = value.strip_prefix('/')?.strip_suffix('/')?;
+    let trailing_backslashes = pattern
+        .bytes()
+        .rev()
+        .take_while(|byte| *byte == b'\\')
+        .count();
+    (trailing_backslashes % 2 == 0).then_some(pattern)
+}
+
+fn unescape_slashes(value: &str) -> String {
+    let mut chars = value.chars().peekable();
+    let mut text = String::with_capacity(value.len());
+    while let Some(ch) = chars.next() {
+        if ch == '\\' && chars.peek() == Some(&'/') {
+            chars.next();
+            text.push('/');
+        } else {
+            text.push(ch);
+        }
+    }
+    text
+}
+
 impl TableData {
     pub fn count(&self, filters: &[(usize, String)]) -> Result<usize> {
-        let (where_clause, params) = self.where_clause(filters);
+        let conn = self.connection.lock().expect("DuckDB connection poisoned");
+        let (where_clause, params) = self.where_clause(filters, &conn);
         // An unfiltered count can use the original table without evaluating
         // SQLite's BLOB-length projection for every row.
         let source = if filters.is_empty() {
@@ -288,12 +314,15 @@ impl TableData {
             "data"
         };
         let sql = format!("SELECT count(*) FROM {source} {where_clause}");
-        let conn = self.connection.lock().expect("DuckDB connection poisoned");
         let count: i64 = conn.query_row(&sql, params_from_iter(&params), |row| row.get(0))?;
         Ok(usize::try_from(count)?)
     }
 
-    fn where_clause(&self, filters: &[(usize, String)]) -> (String, Vec<String>) {
+    fn where_clause(
+        &self,
+        filters: &[(usize, String)],
+        conn: &Connection,
+    ) -> (String, Vec<String>) {
         let mut params = Vec::new();
         let conditions = filters
             .iter()
@@ -319,6 +348,18 @@ impl TableData {
                 }
                 let column = &self.columns[*ix];
                 let name = quoted(&column.name);
+                if let Some(pattern) = regex_pattern(value) {
+                    // DuckDB compiles regexes during binding, outside the reach of TRY().
+                    // Validate before using the pattern so partial input cannot break the table query.
+                    if conn
+                        .query_row("SELECT regexp_matches('', ?)", [pattern], |_| Ok(()))
+                        .is_err()
+                    {
+                        return "FALSE".into();
+                    }
+                    params.push(pattern.to_owned());
+                    return format!("regexp_matches(CAST({name} AS VARCHAR), ?)");
+                }
                 for op in [">=", "<=", "<>", "=", ">", "<"] {
                     if let Some(operand) = value.strip_prefix(op) {
                         let typed = matches!(
@@ -346,8 +387,9 @@ impl TableData {
                     }
                 }
                 // LIKE treats '_' as a wildcard; only '%' is special in user input.
-                let pattern = value.replace('\\', "\\\\").replace('_', "\\_");
-                params.push(if value.contains('%') {
+                let text = unescape_slashes(value);
+                let pattern = text.replace('\\', "\\\\").replace('_', "\\_");
+                params.push(if text.contains('%') {
                     pattern
                 } else {
                     format!("%{pattern}%")
@@ -399,7 +441,8 @@ impl TableData {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        let (where_clause, filter_params) = self.where_clause(filters);
+        let conn = self.connection.lock().expect("DuckDB connection poisoned");
+        let (where_clause, filter_params) = self.where_clause(filters, &conn);
         let order = match sort {
             Some((ix, descending)) => {
                 // Page boundaries must not depend on the execution order of equal sort keys.
@@ -440,7 +483,6 @@ impl TableData {
         if let (Some(limit), Some(offset)) = (&limit, &offset) {
             params.extend([limit as &dyn duckdb::ToSql, offset as &dyn duckdb::ToSql]);
         }
-        let conn = self.connection.lock().expect("DuckDB connection poisoned");
         let mut statement = conn.prepare(&sql)?;
         let mut result = statement.query(params_from_iter(params))?;
         let mut rows = Vec::new();
@@ -905,6 +947,41 @@ mod tests {
         ] {
             assert_filtered(&table, &[(0, filter.into())], &expected);
         }
+    }
+
+    #[test]
+    fn regex_filters_match_columns_and_escaped_slashes_remain_literal() {
+        assert_eq!(regex_pattern(r"/a\/"), None);
+        assert_eq!(regex_pattern(r"/a\\/"), Some(r"a\\"));
+        assert_eq!(regex_pattern(r"\/path\/"), None);
+
+        let table = filter_table();
+        table
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO data VALUES ('/path/to/', 'slash', 3, 1.0, DATE '2024-01-01')",
+            )
+            .unwrap();
+
+        for (filter, expected) in [
+            (r"/^a/", vec!["a_b"]),
+            (r"/(?i)^a/", vec!["Alpha", "a_b"]),
+            (r"/b$/", vec!["Bob", "a_b"]),
+            (r"/b%/", vec!["b%"]),
+            (r"/^\/path\/to\/$/", vec!["/path/to/"]),
+            (r"\/path\/to\/", vec!["/path/to/"]),
+            (r"/[/", vec![]),
+            (r"/^' OR 1=1 --$/", vec![]),
+            (r"/^a", vec![]),
+        ] {
+            assert_filtered(&table, &[(0, filter.into())], &expected);
+        }
+        assert_filtered(&table, &[(0, "=/^a/".into())], &[]);
+        assert_filtered(&table, &[(0, "/[/".into()), (2, ">2".into())], &[]);
+        assert_eq!(table.count(&[(0, "//".into())]).unwrap(), 6);
+        assert_filtered(&table, &[(0, r"/^a/".into()), (2, ">5".into())], &["a_b"]);
     }
 
     #[test]
