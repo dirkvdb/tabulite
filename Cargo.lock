@@ -7252,7 +7252,6 @@ dependencies = [
  "serde",
  "serial_test",
  "toml 1.1.6+spec-1.1.0",
- "zip 6.0.0",
 ]
 
 [[package]]

@@ -45,6 +45,7 @@
             nativeBuildInputs = [
               pkgs.pkg-config
               pkgs.makeWrapper
+              pkgs.imagemagick
             ];
             buildInputs = [
               duckdb.lib
@@ -62,7 +63,8 @@
 
             postInstall = ''
               install -Dm644 tabulite.desktop $out/share/applications/tabulite.desktop
-              install -Dm644 logo.svg $out/share/icons/hicolor/scalable/apps/tabulite.svg
+              install -d $out/share/icons/hicolor/512x512/apps
+              magick logo.png -resize 512x512 $out/share/icons/hicolor/512x512/apps/tabulite.png
             '';
 
             cargoLock.lockFile = ./Cargo.lock;

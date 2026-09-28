@@ -7,9 +7,11 @@ build_release:
 build: build_release
 
 test_debug test_name='' $RUST_LOG="debug":
+    python3 scripts/generate-test-data.py --tests-only
     cargo nextest run --workspace --no-capture {{ test_name }}
 
 test_release test_name='':
+    python3 scripts/generate-test-data.py --tests-only
     cargo nextest run --workspace --release {{ test_name }}
 
 test: test_release

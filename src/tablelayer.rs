@@ -869,13 +869,7 @@ mod tests {
 
     #[test]
     fn keeps_only_a_bounded_page_of_a_large_file() {
-        let path =
-            std::env::temp_dir().join(format!("tabulite-page-cache-{}.csv", std::process::id()));
-        let mut csv = String::from("name,amount\n");
-        for ix in 0..1024 {
-            csv.push_str(&format!("row_{ix},{ix}\n"));
-        }
-        std::fs::write(&path, csv).unwrap();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/page-cache.csv");
         let result = (|| -> anyhow::Result<()> {
             let source = crate::tableio::layer_data(&path, "page-cache")?;
             let count = source.count(&[])?;
@@ -898,18 +892,12 @@ mod tests {
             assert_eq!(layer.columns[0].width, row_number_width(1_000_000));
             Ok(())
         })();
-        std::fs::remove_file(path).unwrap();
         result.unwrap();
     }
 
     #[test]
     fn eager_tables_keep_every_row_across_page_boundaries() {
-        let path = std::env::temp_dir().join(format!("tabulite-eager-{}.csv", std::process::id()));
-        let mut csv = String::from("name,amount\n");
-        for ix in 0..300 {
-            csv.push_str(&format!("row_{ix},{ix}\n"));
-        }
-        std::fs::write(&path, csv).unwrap();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/eager.csv");
         let result = (|| -> anyhow::Result<()> {
             let mut source = crate::tableio::layer_data(&path, "eager")?;
             source.loading_mode = LoadingMode::Eager;
@@ -924,7 +912,6 @@ mod tests {
             assert_eq!(layer.data.len(), 3);
             Ok(())
         })();
-        std::fs::remove_file(path).unwrap();
         result.unwrap();
     }
 

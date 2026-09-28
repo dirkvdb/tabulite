@@ -20,6 +20,8 @@ in
     cargo-nextest
     duckdb.lib
     duckdb.dev
+    duckdb
+    (python3.withPackages (pythonPackages: [ pythonPackages.openpyxl ]))
     just
     sccache
     pkg-config
@@ -31,6 +33,10 @@ in
   ] ++ lib.optionals pkgs.stdenv.isDarwin [
     apple-sdk_15
   ];
+
+  enterShell = ''
+    python3 "$DEVENV_ROOT/scripts/generate-test-data.py"
+  '';
 
   env = {
     RUSTC_WRAPPER = "${pkgs.sccache}/bin/sccache";

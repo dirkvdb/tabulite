@@ -92,23 +92,13 @@ fn load_config_from_path(path: &Path) -> Result<AppConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     #[test]
     fn test_load_config_from_toml() {
-        let toml_content = r#"
-theme = "light"
-"#;
-        let temp_dir = std::env::temp_dir();
-        let config_path = temp_dir.join("test_config.toml");
-
-        let mut file = fs::File::create(&config_path).unwrap();
-        file.write_all(toml_content.as_bytes()).unwrap();
+        let config_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/config.toml");
 
         let config = load_config(Some(&config_path));
         assert_eq!(config.theme, "light");
-
-        fs::remove_file(config_path).ok();
     }
 
     #[test]

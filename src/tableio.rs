@@ -20,6 +20,9 @@ pub struct TableData {
     connection: Arc<Mutex<Connection>>,
     pub columns: Vec<TableColumn>,
     pub loading_mode: LoadingMode,
+    // SQLite BLOBs are represented by their byte lengths in the data view.
+    blob_sizes: bool,
+    count_source: Option<String>,
 }
 
 #[derive(Clone)]
@@ -174,7 +177,8 @@ pub fn layer_data(path: &Path, layer: &str) -> Result<TableData> {
     };
     conn.execute_batch(&format!("CREATE VIEW data AS SELECT * FROM {source}"))?;
 
-    let columns = {
+    let mut sqlite_types = Vec::new();
+    let columns: Vec<TableColumn> = {
         let mut statement = conn.prepare("SELECT * FROM data LIMIT 0")?;
         let _ = statement.query([])?;
         statement
@@ -182,7 +186,25 @@ pub fn layer_data(path: &Path, layer: &str) -> Result<TableData> {
             .into_iter()
             .enumerate()
             .map(|(ix, name)| {
-                let kind = match statement.column_type(ix) {
+                let data_type = statement.column_type(ix);
+                if file_type == FileType::Sqlite {
+                    sqlite_types.push(match data_type {
+                        DataType::Int8
+                        | DataType::Int16
+                        | DataType::Int32
+                        | DataType::Int64
+                        | DataType::UInt8
+                        | DataType::UInt16
+                        | DataType::UInt32
+                        | DataType::UInt64 => "BIGINT",
+                        DataType::Float16 | DataType::Float32 | DataType::Float64 => "DOUBLE",
+                        DataType::Date32 | DataType::Date64 => "DATE",
+                        DataType::Timestamp(_, _) => "TIMESTAMP",
+                        DataType::Binary | DataType::LargeBinary | DataType::BinaryView => "BIGINT",
+                        _ => "VARCHAR",
+                    });
+                }
+                let kind = match data_type {
                     DataType::Boolean => ColumnKind::Boolean,
                     DataType::Int8
                     | DataType::Int16
@@ -211,18 +233,61 @@ pub fn layer_data(path: &Path, layer: &str) -> Result<TableData> {
             })
             .collect()
     };
+    let blob_sizes = file_type == FileType::Sqlite
+        && columns.iter().any(|column| column.kind == ColumnKind::Blob);
+    if blob_sizes {
+        // The SQLite scanner copies a full vector (2048 rows) of BLOBs before
+        // DuckDB applies LIMIT. Compute sizes inside SQLite to avoid loading the
+        // payloads into DuckDB, including during sorting and filtering.
+        let sqlite_columns = columns
+            .iter()
+            .map(|column| {
+                let name = quoted(&column.name);
+                if column.kind == ColumnKind::Blob {
+                    format!("length({name}) AS {name}")
+                } else {
+                    name
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sqlite_sql = format!("SELECT {sqlite_columns} FROM {}", quoted(layer));
+        let typed_columns = columns
+            .iter()
+            .zip(sqlite_types)
+            .map(|(column, ty)| {
+                let name = quoted(&column.name);
+                format!("CAST({name} AS {ty}) AS {name}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        conn.execute_batch("DROP VIEW data")?;
+        conn.execute_batch(&format!(
+            "CREATE VIEW data AS SELECT {typed_columns} FROM sqlite_query('source', {})",
+            sql_literal(&sqlite_sql)
+        ))?;
+    }
     log::debug!("Read table done");
     Ok(TableData {
         connection: Arc::new(Mutex::new(conn)),
         columns,
         loading_mode: file_type.loading_mode(),
+        blob_sizes,
+        count_source: blob_sizes.then(|| format!("source.main.{}", quoted(layer))),
     })
 }
 
 impl TableData {
     pub fn count(&self, filters: &[(usize, String)]) -> Result<usize> {
         let (where_clause, params) = self.where_clause(filters);
-        let sql = format!("SELECT count(*) FROM data {where_clause}");
+        // An unfiltered count can use the original table without evaluating
+        // SQLite's BLOB-length projection for every row.
+        let source = if filters.is_empty() {
+            self.count_source.as_deref().unwrap_or("data")
+        } else {
+            "data"
+        };
+        let sql = format!("SELECT count(*) FROM {source} {where_clause}");
         let conn = self.connection.lock().expect("DuckDB connection poisoned");
         let count: i64 = conn.query_row(&sql, params_from_iter(&params), |row| row.get(0))?;
         Ok(usize::try_from(count)?)
@@ -326,7 +391,7 @@ impl TableData {
             .iter()
             .map(|column| {
                 let name = quoted(&column.name);
-                if column.kind == ColumnKind::Blob {
+                if column.kind == ColumnKind::Blob && !self.blob_sizes {
                     format!("CAST(octet_length({name}) AS VARCHAR)")
                 } else {
                     format!("CAST({name} AS VARCHAR)")
@@ -344,7 +409,7 @@ impl TableData {
                     .iter()
                     .map(|column| {
                         let name = quoted(&column.name);
-                        if column.kind == ColumnKind::Blob {
+                        if column.kind == ColumnKind::Blob && !self.blob_sizes {
                             format!("octet_length({name})")
                         } else {
                             name
@@ -446,8 +511,13 @@ fn format_float(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use zip::{ZipWriter, write::SimpleFileOptions};
+    use std::{io::Write, path::PathBuf};
+
+    fn fixture_path(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("testdata")
+            .join(name)
+    }
 
     #[test]
     fn formats_blob_sizes_compactly() {
@@ -512,39 +582,10 @@ mod tests {
         );
         crate::excel::load(&conn).unwrap();
 
-        let path = std::env::temp_dir().join(format!("tabulite-{}.xlsx", std::process::id()));
-        let result = (|| -> Result<_> {
-            let file = std::fs::File::create(&path)?;
-            let mut zip = ZipWriter::new(file);
-            let options =
-                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-            zip.start_file("[Content_Types].xml", options)?;
-            zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#)?;
-            zip.start_file("_rels/.rels", options)?;
-            zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#)?;
-            zip.start_file("xl/workbook.xml", options)?;
-            zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sales &amp; Costs" sheetId="1" r:id="rId1"/><sheet name="Other" sheetId="2" r:id="rId2"/></sheets></workbook>"#)?;
-            zip.start_file("xl/_rels/workbook.xml.rels", options)?;
-            zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#)?;
-            zip.start_file("xl/worksheets/sheet1.xml", options)?;
-            zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:B3"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>name</t></is></c><c r="B1" t="inlineStr"><is><t>amount</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Alice</t></is></c><c r="B2"><v>10</v></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Bob</t></is></c><c r="B3"><v>2</v></c></row></sheetData></worksheet>"#)?;
-            zip.start_file("xl/worksheets/sheet2.xml", options)?;
-            let mut sheet = String::from(
-                r#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:A151"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>label</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>second</t></is></c></row>"#,
-            );
-            for row in 3..=151 {
-                sheet.push_str(&format!("<row r=\"{row}\"><c r=\"A{row}\" t=\"inlineStr\"><is><t>row_{}</t></is></c></row>", row - 1));
-            }
-            sheet.push_str("</sheetData></worksheet>");
-            zip.write_all(sheet.as_bytes())?;
-            zip.finish()?;
-
-            let layers = layers_for_path(&path)?;
-            let sales = layer_data(&path, layers[0].as_ref())?;
-            let other = layer_data(&path, layers[1].as_ref())?;
-            Ok((layers, sales, other))
-        })();
-        let (layers, sales, other) = result.unwrap();
+        let path = fixture_path("multiple-sheets.xlsx");
+        let layers = layers_for_path(&path).unwrap();
+        let sales = layer_data(&path, layers[0].as_ref()).unwrap();
+        let other = layer_data(&path, layers[1].as_ref()).unwrap();
         assert_eq!(sales.loading_mode, LoadingMode::Eager);
         assert_eq!(sales.query_all(&[], None).unwrap().rows.len(), 2);
         assert_eq!(
@@ -605,39 +646,14 @@ mod tests {
             sales.query_page(&[], None, 1, 1).unwrap().rows[0][0].as_deref(),
             Some("Bob")
         );
-        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
     fn reads_sqlite_tables_read_only_with_duckdb() {
-        let path = std::env::temp_dir().join(format!("tabulite-sqlite-{}.db", std::process::id()));
-        let result = (|| -> Result<_> {
-            let conn = Connection::open_in_memory()?;
-            conn.execute_batch(
-                "SET autoinstall_known_extensions = false; SET autoload_known_extensions = false; \
-                 LOAD sqlite_scanner",
-            )?;
-            conn.execute_batch(&format!(
-                "ATTACH '{}' AS fixture (TYPE sqlite); \
-                 CREATE TABLE fixture.metadata (name TEXT, amount INTEGER); \
-                 INSERT INTO fixture.metadata VALUES ('Alice', 10), ('Bob', 2); \
-                 CREATE TABLE fixture.\"tile\"\"data\" (zoom INTEGER, tile_data BLOB); \
-                 INSERT INTO fixture.\"tile\"\"data\" VALUES \
-                   (1, from_hex('010203')), \
-                   (2, CAST(repeat('a', 1536) AS BLOB)), \
-                   (3, CAST(repeat('a', 1572864) AS BLOB)), \
-                   (4, NULL); \
-                 DETACH fixture",
-                path.display()
-            ))?;
-            drop(conn);
-
-            let layers = layers_for_path(&path)?;
-            let metadata = layer_data(&path, layers[0].as_ref())?;
-            let tiles = layer_data(&path, layers[1].as_ref())?;
-            Ok((layers, metadata, tiles))
-        })();
-        let (layers, metadata, tiles) = result.unwrap();
+        let path = fixture_path("sqlite-tables.db");
+        let layers = layers_for_path(&path).unwrap();
+        let metadata = layer_data(&path, layers[0].as_ref()).unwrap();
+        let tiles = layer_data(&path, layers[1].as_ref()).unwrap();
         assert_eq!(
             layers
                 .iter()
@@ -697,13 +713,38 @@ mod tests {
             metadata.query_page(&[], None, 1, 1).unwrap().rows[0][0].as_deref(),
             Some("Bob")
         );
-        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn pages_sqlite_blobs_without_materializing_payloads() {
+        let path = fixture_path("large-files/paged-blobs.db");
+        let result = (|| -> Result<()> {
+            let table = layer_data(&path, "payload")?;
+            assert_eq!(table.loading_mode, LoadingMode::Paged);
+            // The scanner's vector would exceed this limit if it read the BLOBs.
+            table
+                .connection
+                .lock()
+                .unwrap()
+                .execute_batch("SET memory_limit = '64MiB'")?;
+            assert_eq!(table.count(&[])?, 80);
+            let rows = table.query_page(&[], None, 0, 81)?.rows;
+            assert_eq!(rows.len(), 80);
+            assert_eq!(rows[0][1].as_deref(), Some("1 MB"));
+
+            assert_eq!(
+                table.query_page(&[], Some((0, true)), 0, 1)?.rows[0][0].as_deref(),
+                Some("79")
+            );
+            assert_eq!(table.count(&[(1, ">1000000".into())])?, 80);
+            Ok(())
+        })();
+        result.unwrap();
     }
 
     #[test]
     fn reads_csv_file_with_inferred_types() {
-        let path = std::env::temp_dir().join(format!("tabulite-{}.csv", std::process::id()));
-        std::fs::write(&path, "name,amount,enabled\nAlice,10,true\nBob,2,false\n").unwrap();
+        let path = fixture_path("inferred-types.csv");
         let result = (|| -> Result<_> {
             let layers = layers_for_path(&path)?;
             let table = layer_data(&path, layers[0].as_ref())?;
@@ -719,7 +760,6 @@ mod tests {
                 table.query_page(&[], Some((1, false)), 0, 10)?.rows,
             ))
         })();
-        std::fs::remove_file(&path).unwrap();
         let (layers, columns, rows, filtered, sorted) = result.unwrap();
         assert_eq!(layers.len(), 1);
         assert_eq!(
@@ -747,8 +787,12 @@ mod tests {
 
     #[test]
     fn csv_view_reads_appended_rows_and_pages() {
-        let path = std::env::temp_dir().join(format!("tabulite-'lazy'-{}.csv", std::process::id()));
-        std::fs::write(&path, "name,amount\nAlice,10\nBob,2\n").unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "tabulite-'lazy'-{}-{}.csv",
+            std::process::id(),
+            NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::copy(fixture_path("lazy.csv"), &path).unwrap();
         let result = (|| -> Result<()> {
             let table = layer_data(&path, "unused")?;
             assert_eq!(table.loading_mode, LoadingMode::Paged);
@@ -756,7 +800,7 @@ mod tests {
             std::fs::OpenOptions::new()
                 .append(true)
                 .open(&path)?
-                .write_all(b"Carol,3\n")?;
+                .write_all(&std::fs::read(fixture_path("lazy-appended.csv"))?)?;
             assert_eq!(table.count(&[])?, 3);
             assert_eq!(table.count(&[(0, "ar".into())])?, 1);
             assert_eq!(
@@ -774,14 +818,13 @@ mod tests {
     #[test]
     fn sorted_page_boundaries_are_stable_for_equal_keys() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE data (name VARCHAR, amount INTEGER); \
-             INSERT INTO data VALUES ('Zoe', 10), ('Alice', 10), ('Bob', 10), ('Carol', 2)",
-        )
-        .unwrap();
+        conn.execute_batch(&std::fs::read_to_string(fixture_path("sorted-pages.sql")).unwrap())
+            .unwrap();
         let table = TableData {
             connection: Arc::new(Mutex::new(conn)),
             loading_mode: LoadingMode::Paged,
+            blob_sizes: false,
+            count_source: None,
             columns: vec![
                 TableColumn {
                     name: "name".into(),
@@ -805,20 +848,13 @@ mod tests {
 
     fn filter_table() -> TableData {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE data (\"a\"\"b\" VARCHAR, note VARCHAR, amount BIGINT, price DOUBLE, day DATE); \
-             INSERT INTO data VALUES \
-             ('Alpha', 'first', 2, 1.5, DATE '2024-01-01'), \
-             ('a_b', 'second', 10, 2.5, DATE '2024-03-01'), \
-             ('Bob', 'alpha', 5, 3.5, DATE '2024-02-01'), \
-             ('b%', 'percent', 1, 4.5, DATE '2023-12-01'), \
-             ('x\\back', 'slash', 9007199254740993, 5.5, DATE '2025-01-01'), \
-             (NULL, NULL, NULL, NULL, NULL)",
-        )
-        .unwrap();
+        conn.execute_batch(&std::fs::read_to_string(fixture_path("filter-table.sql")).unwrap())
+            .unwrap();
         TableData {
             connection: Arc::new(Mutex::new(conn)),
             loading_mode: LoadingMode::Paged,
+            blob_sizes: false,
+            count_source: None,
             columns: [
                 ("a\"b", ColumnKind::Text),
                 ("note", ColumnKind::Text),
@@ -940,10 +976,13 @@ mod tests {
     #[test]
     fn filters_are_literal_case_insensitive_and_sort_is_numeric() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE data (\"a\"\"b\" VARCHAR, amount INTEGER); INSERT INTO data VALUES ('A_%', 10), ('aX%', 2), (NULL, NULL)").unwrap();
+        conn.execute_batch(&std::fs::read_to_string(fixture_path("literal-filters.sql")).unwrap())
+            .unwrap();
         let table = TableData {
             connection: Arc::new(Mutex::new(conn)),
             loading_mode: LoadingMode::Paged,
+            blob_sizes: false,
+            count_source: None,
             columns: vec![
                 TableColumn {
                     name: "a\"b".into(),
