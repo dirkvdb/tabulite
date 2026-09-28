@@ -56,6 +56,10 @@
             DUCKDB_LIB_DIR = "${duckdb.lib}/lib";
             DUCKDB_INCLUDE_DIR = "${duckdb.dev}/include";
 
+            preCheck = ''
+              ${pkgs.python3.withPackages (pythonPackages: [ pythonPackages.openpyxl ])}/bin/python3 scripts/generate-test-data.py
+            '';
+
             postFixup = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
               wrapProgram $out/bin/tabulite \
                 --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath (linuxRuntimeDeps ++ [ duckdb.lib ])}
