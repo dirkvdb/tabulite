@@ -134,13 +134,7 @@ impl Tabulite {
 }
 
 impl Render for Tabulite {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let notification_layer = Root::render_notification_layer(window, cx);
-
-        div()
-            .v_flex()
-            .size_full()
-            .child(self.table.clone())
-            .children(notification_layer)
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div().v_flex().size_full().child(self.table.clone())
     }
 }

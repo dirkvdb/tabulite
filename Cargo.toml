@@ -7,7 +7,7 @@ edition = "2024"
 clap = { version = "4", features = ["derive"] }
 duckdb = "1"
 calamine = "0.36"
-gpui-kit = "0.6"
+gpui-kit = "0.7"
 anyhow = "1"
 log = "0.4.29"
 toml = "1.1"

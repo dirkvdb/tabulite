@@ -4,7 +4,7 @@ use gpui_kit::component::scroll::{Scrollbar, ScrollbarAxis};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::table::{
     ColumnSort, DataTable, Table, TableBody, TableCell, TableDelegate, TableEvent, TableHead,
-    TableHeader, TableRow, TableState,
+    TableHeader, TableRow, TableSelection, TableState,
 };
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::*;
@@ -50,6 +50,10 @@ impl TableView {
                     table.delegate_mut().set_column_widths(widths);
                 });
             } else if let TableEvent::SelectColumn(col_ix) = event {
+                table.update(cx, |table, _| {
+                    table.delegate_mut().set_selected_col(*col_ix);
+                });
+            } else if let TableEvent::SelectCell(_, col_ix) = event {
                 table.update(cx, |table, _| {
                     table.delegate_mut().set_selected_col(*col_ix);
                 });
@@ -114,14 +118,19 @@ impl TableView {
                 return;
             }
 
-            let selected = table.selected_col().unwrap_or(1);
+            let selected = table
+                .selected_cell()
+                .map(|(_, col)| col)
+                .or_else(|| table.selected_col())
+                .unwrap_or(1);
             let selected = if selected <= 1 {
                 columns_count - 1
             } else {
                 selected - 1
             };
+            let row = table.selected_cell().map_or(0, |(row, _)| row);
             table.delegate_mut().set_selected_col(selected);
-            table.set_selected_col(selected, cx);
+            table.set_selection(TableSelection::Cell(row, selected), cx);
         });
     }
 
@@ -132,14 +141,19 @@ impl TableView {
                 return;
             }
 
-            let selected = table.selected_col().unwrap_or(0);
+            let selected = table
+                .selected_cell()
+                .map(|(_, col)| col)
+                .or_else(|| table.selected_col())
+                .unwrap_or(0);
             let selected = if selected + 1 < columns_count {
                 selected + 1
             } else {
                 1
             };
+            let row = table.selected_cell().map_or(0, |(row, _)| row);
             table.delegate_mut().set_selected_col(selected);
-            table.set_selected_col(selected, cx);
+            table.set_selection(TableSelection::Cell(row, selected), cx);
         });
     }
 
@@ -150,10 +164,18 @@ impl TableView {
                 if let Some((selected, top)) = half_page_move(
                     visible,
                     table.delegate().rows_count(),
-                    table.selected_row(),
+                    table
+                        .selected_cell()
+                        .map(|(row, _)| row)
+                        .or_else(|| table.selected_row()),
                     down,
                 ) {
-                    table.set_selected_row(selected, cx);
+                    let col = table
+                        .selected_cell()
+                        .map(|(_, col)| col)
+                        .or_else(|| table.selected_col())
+                        .unwrap_or(0);
+                    table.set_selection(TableSelection::Cell(selected, col), cx);
                     table
                         .vertical_scroll_handle
                         .scroll_to_item_strict(top, ScrollStrategy::Top);
@@ -181,8 +203,20 @@ impl TableView {
                 return;
             }
 
-            let selected = table.selected_row().unwrap_or(0);
-            table.set_selected_row(selected.checked_sub(1).unwrap_or(rows_count - 1), cx);
+            let selected = table
+                .selected_cell()
+                .map(|(row, _)| row)
+                .or_else(|| table.selected_row())
+                .unwrap_or(0);
+            let col = table
+                .selected_cell()
+                .map(|(_, col)| col)
+                .or_else(|| table.selected_col())
+                .unwrap_or(0);
+            table.set_selection(
+                TableSelection::Cell(selected.checked_sub(1).unwrap_or(rows_count - 1), col),
+                cx,
+            );
         });
     }
 
@@ -193,15 +227,29 @@ impl TableView {
                 return;
             }
 
-            let selected = table.selected_row().map_or(0, |row| (row + 1) % rows_count);
-            table.set_selected_row(selected, cx);
+            let selected = table
+                .selected_cell()
+                .map(|(row, _)| (row + 1) % rows_count)
+                .or_else(|| table.selected_row().map(|row| (row + 1) % rows_count))
+                .unwrap_or(0);
+            let col = table
+                .selected_cell()
+                .map(|(_, col)| col)
+                .or_else(|| table.selected_col())
+                .unwrap_or(0);
+            table.set_selection(TableSelection::Cell(selected, col), cx);
         });
     }
 
     pub(crate) fn select_first_row(&mut self, cx: &mut Context<Self>) {
         self.table.update(cx, |table, cx| {
             if table.delegate().rows_count() > 0 {
-                table.set_selected_row(0, cx);
+                let col = table
+                    .selected_cell()
+                    .map(|(_, col)| col)
+                    .or_else(|| table.selected_col())
+                    .unwrap_or(0);
+                table.set_selection(TableSelection::Cell(0, col), cx);
             }
         });
     }
@@ -210,14 +258,24 @@ impl TableView {
         self.table.update(cx, |table, cx| {
             let rows_count = table.delegate().rows_count();
             if rows_count > 0 {
-                table.set_selected_row(rows_count - 1, cx);
+                let col = table
+                    .selected_cell()
+                    .map(|(_, col)| col)
+                    .or_else(|| table.selected_col())
+                    .unwrap_or(0);
+                table.set_selection(TableSelection::Cell(rows_count - 1, col), cx);
             }
         });
     }
 
     pub(crate) fn focus_selected_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.table.update(cx, |table, cx| {
-            let Some(col_ix) = table.selected_col().filter(|ix| *ix > 0) else {
+            let Some(col_ix) = table
+                .selected_cell()
+                .map(|(_, col)| col)
+                .or_else(|| table.selected_col())
+                .filter(|ix| *ix > 0)
+            else {
                 return;
             };
 
@@ -239,7 +297,11 @@ impl TableView {
         cx: &mut Context<Self>,
     ) {
         self.table.update(cx, |table, cx| {
-            let Some(col_ix) = table.selected_col() else {
+            let Some(col_ix) = table
+                .selected_cell()
+                .map(|(_, col)| col)
+                .or_else(|| table.selected_col())
+            else {
                 return;
             };
 

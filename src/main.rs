@@ -36,14 +36,10 @@ fn main() {
             log::error!("Failed to watch themes directory: {}", err);
         }
 
-        cx.spawn(async move |cx| {
-            cx.open_window(WindowOptions::default(), |window, cx| {
-                let app = Tabulite::view(args.input_file, window, cx);
-                cx.new(|cx| Root::new(app, window, cx))
-            })?;
-
-            Ok::<_, anyhow::Error>(())
-        })
-        .detach();
+        if let Err(err) = gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+            Tabulite::view(args.input_file, window, cx)
+        }) {
+            log::error!("Failed to open application window: {err}");
+        }
     });
 }
