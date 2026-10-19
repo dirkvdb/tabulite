@@ -514,6 +514,38 @@ impl TableLayer {
         };
     }
 
+    fn fitted_content_width(
+        &self,
+        col_ix: usize,
+        sort_icon_width: Pixels,
+        mut measure: impl FnMut(&str, bool) -> Pixels,
+    ) -> Option<Pixels> {
+        let data_ix = col_ix.checked_sub(1)?;
+        let column = self.columns.get(col_ix)?;
+        let kind = self
+            .source
+            .as_ref()
+            .map_or(ColumnKind::Text, |source| source.columns[data_ix].kind);
+        let heading = measure(&column.name, false)
+            + if column.sort.is_some() {
+                sort_icon_width
+            } else {
+                px(0.)
+            };
+        // Only inspect cached pages; fitting must not start database queries on the UI thread.
+        Some(
+            self.data
+                .values()
+                .flatten()
+                .filter_map(|row| row.get(data_ix))
+                .map(|value| match badge_label(kind, value.as_deref()) {
+                    Some(label) => measure(&label, true),
+                    None => measure(value.as_deref().unwrap_or_default(), false),
+                })
+                .fold(heading, Pixels::max),
+        )
+    }
+
     fn create_column_info(&mut self) {
         let previous_widths: HashMap<_, _> = self
             .columns
@@ -606,6 +638,54 @@ impl TableDelegate for TableLayer {
 
     fn column(&self, col_ix: usize, _: &App) -> Column {
         self.columns[col_ix].clone()
+    }
+
+    fn fit_column(
+        &mut self,
+        col_ix: usize,
+        window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> Option<Pixels> {
+        let font_size = div()
+            .table_cell_size(Size::XSmall)
+            .style()
+            .text
+            .font_size
+            .unwrap()
+            .to_pixels(window.rem_size());
+        let mut font = window.text_style().font();
+        font.family = cx.theme().font_family.clone();
+        let rem_size = window.rem_size();
+        self.fitted_content_width(
+            col_ix,
+            rems(0.75).to_pixels(rem_size) + px(4.),
+            |text, badge| {
+                let run = TextRun {
+                    len: text.len(),
+                    font: font.clone(),
+                    color: Hsla::default(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let size = if badge {
+                    rems(0.625).to_pixels(rem_size)
+                } else {
+                    font_size
+                };
+                let width = window
+                    .text_system()
+                    .shape_line(SharedString::new(text), size, &[run], None)
+                    .width();
+                // XSmall tags add 0.375rem padding on each side and a 1px border.
+                width
+                    + if badge {
+                        rems(0.75).to_pixels(rem_size) + px(2.)
+                    } else {
+                        px(0.)
+                    }
+            },
+        )
     }
 
     fn render_header(
@@ -953,6 +1033,44 @@ mod tests {
         assert_eq!(badge_label(ColumnKind::Blob, None), Some("null".into()));
         assert_eq!(badge_label(ColumnKind::Text, None), Some("null".into()));
         assert_eq!(badge_label(ColumnKind::Text, Some("3 B")), None);
+    }
+
+    #[test]
+    fn fitting_measures_all_cached_pages_and_keeps_the_header() {
+        let mut layer = TableLayer::default();
+        layer.columns = vec![
+            Column::new("row", "#"),
+            Column::new("value", "heading").sortable(),
+        ];
+        let measure = |text: &str, _: bool| px(text.len() as f32);
+        assert_eq!(
+            layer.fitted_content_width(1, px(4.), measure),
+            Some(px(11.))
+        );
+        layer.data.insert(0, vec![vec![Some("short".into())]]);
+        layer
+            .data
+            .insert(PAGE_SIZE, vec![vec![Some("longest cached value".into())]]);
+        assert_eq!(
+            layer.fitted_content_width(1, px(4.), measure),
+            Some(px(20.))
+        );
+        assert_eq!(layer.fitted_content_width(0, px(4.), measure), None);
+        assert_eq!(layer.fitted_content_width(2, px(4.), measure), None);
+    }
+
+    #[test]
+    fn fitting_measures_null_as_a_badge() {
+        let mut layer = TableLayer::default();
+        layer.columns = vec![Column::new("row", "#"), Column::new("value", "v")];
+        layer.data.insert(0, vec![vec![None]]);
+        assert_eq!(
+            layer.fitted_content_width(1, px(0.), |text, badge| {
+                assert_eq!(badge, text == "null");
+                px(text.len() as f32 + if badge { 10. } else { 0. })
+            }),
+            Some(px(14.))
+        );
     }
 
     #[test]
