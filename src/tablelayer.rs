@@ -562,7 +562,7 @@ impl TableLayer {
             .map(|(col_ix, column_info)| {
                 let name = SharedString::new(column_info.name.as_str());
                 let dtype = column_info.kind;
-                let (min_width, preferred_width, max_width) = column_widths(
+                let (min_width, preferred_width) = column_widths(
                     name.as_ref(),
                     dtype,
                     self.data
@@ -579,8 +579,7 @@ impl TableLayer {
                 let mut column = Column::new(name.clone(), name)
                     .sortable()
                     .width(width)
-                    .min_width(px(min_width))
-                    .max_width(px(max_width));
+                    .min_width(px(min_width));
 
                 if matches!(dtype, ColumnKind::Number | ColumnKind::Float) {
                     column = column.text_right();
@@ -921,7 +920,7 @@ fn column_widths(
     name: &str,
     dtype: ColumnKind,
     values: impl Iterator<Item = String>,
-) -> (f32, f32, f32) {
+) -> (f32, f32) {
     let (min_width, max_width) = if dtype == ColumnKind::Boolean {
         (80.0, 140.0)
     } else if matches!(dtype, ColumnKind::Number | ColumnKind::Float) {
@@ -939,7 +938,7 @@ fn column_widths(
         .min(64);
     let preferred_width = (max_chars as f32 * 7.5 + 40.0).clamp(min_width, max_width);
 
-    (min_width, preferred_width, max_width)
+    (min_width, preferred_width)
 }
 
 #[cfg(test)]
@@ -1077,11 +1076,11 @@ mod tests {
     fn constrains_inferred_column_widths() {
         assert_eq!(
             column_widths("enabled", ColumnKind::Boolean, [].into_iter()),
-            (80.0, 92.5, 140.0)
+            (80.0, 92.5)
         );
         assert_eq!(
             column_widths("name", ColumnKind::Text, ["x".repeat(200)].into_iter()),
-            (120.0, 480.0, 480.0)
+            (120.0, 480.0)
         );
     }
 }
