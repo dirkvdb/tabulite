@@ -828,10 +828,34 @@ impl Render for TableView {
                         }),
                 )
             })
-            .child(div().flex_1().size_full().child(match self.loading_mode {
-                LoadingMode::Eager => self.render_eager_content(window, cx).into_any_element(),
-                LoadingMode::Paged => self.render_tab_content(window, cx).into_any_element(),
-            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .size_full()
+                    .child(match self.loading_mode {
+                        LoadingMode::Eager => {
+                            self.render_eager_content(window, cx).into_any_element()
+                        }
+                        LoadingMode::Paged => {
+                            self.render_tab_content(window, cx).into_any_element()
+                        }
+                    }),
+            )
             .child(tab_bar)
+            .child(
+                h_flex()
+                    .id("table-status-bar")
+                    .flex_shrink_0()
+                    .px_2()
+                    .py_1()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .text_xs()
+                    .child(format!(
+                        "Rows: {}",
+                        self.table.read(cx).delegate().rows_count()
+                    )),
+            )
     }
 }
