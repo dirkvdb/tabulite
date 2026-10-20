@@ -3,6 +3,7 @@ use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarAxis};
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::table::{
     ColumnSort, DataTable, Table, TableBody, TableCell, TableDelegate, TableEvent, TableHead,
@@ -12,7 +13,7 @@ use gpui_kit::component::tag::Tag;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use std::{ops::Range, path::PathBuf};
+use std::{ops::Range, path::PathBuf, time::Duration};
 
 use crate::tablelayer::{PAGE_SIZE, TableLayer, cell_filter_menu, row_number};
 use crate::tabulite::{ClearFilter, DismissFilters, ToggleAnyFilter, ToggleFilter};
@@ -30,6 +31,8 @@ pub struct TableView {
     table: Entity<TableState<TableLayer>>,
     eager_scroll: ScrollHandle,
     loading_mode: LoadingMode,
+    loading: bool,
+    show_loading_spinner: bool,
     table_bounds: Bounds<Pixels>,
     _table_subscription: Subscription,
     _table_observation: Subscription,
@@ -71,6 +74,8 @@ impl TableView {
             table,
             eager_scroll: ScrollHandle::new(),
             loading_mode: LoadingMode::Paged,
+            loading: false,
+            show_loading_spinner: false,
             table_bounds: Bounds::default(),
             _table_subscription: table_subscription,
             _table_observation: table_observation,
@@ -352,6 +357,21 @@ impl TableView {
     }
 
     fn clear_table_layer(&mut self, cx: &mut Context<Self>) {
+        self.loading = true;
+        self.show_loading_spinner = false;
+        let generation = self.layer_generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.loading && this.layer_generation == generation {
+                    this.show_loading_spinner = true;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
         self.loading_mode = LoadingMode::Paged;
         self.eager_scroll = ScrollHandle::new();
         self.table.update(cx, |table, cx| {
@@ -389,15 +409,24 @@ impl TableView {
                         this.layer_names = layers;
                         if let Some(layer) = first_layer {
                             this.load_table_layer(path, layer.to_string(), cx).detach();
+                        } else {
+                            this.loading = false;
                         }
                         cx.notify();
                     });
                 }
                 Err(err) => {
-                    if this
-                        .read_with(cx, |this, _| this.file_generation == generation)
-                        .unwrap_or(false)
-                    {
+                    let current = this
+                        .update(cx, |this, cx| {
+                            if this.file_generation != generation {
+                                return false;
+                            }
+                            this.loading = false;
+                            cx.notify();
+                            true
+                        })
+                        .unwrap_or(false);
+                    if current {
                         utils::error_notification("Failed to load data", err, cx);
                     }
                 }
@@ -448,7 +477,9 @@ impl TableView {
                             return;
                         }
                         let initial_count = rows.rows.len() + usize::from(has_more);
+                        this.loading = false;
                         this.loading_mode = data.loading_mode;
+                        cx.notify();
                         let count_source = data.clone();
                         let query_generation = this.table.update(cx, |table, cx| {
                             table.sortable = true;
@@ -494,10 +525,17 @@ impl TableView {
                     });
                 }
                 Err(err) => {
-                    if !this
-                        .read_with(cx, |this, _| this.layer_generation == generation)
-                        .unwrap_or(false)
-                    {
+                    let current = this
+                        .update(cx, |this, cx| {
+                            if this.layer_generation != generation {
+                                return false;
+                            }
+                            this.loading = false;
+                            cx.notify();
+                            true
+                        })
+                        .unwrap_or(false);
+                    if !current {
                         return;
                     }
                     let _ = cx.update(|app| {
@@ -514,6 +552,15 @@ impl TableView {
                 }
             };
         })
+    }
+
+    fn render_loading(&self) -> Div {
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(self.show_loading_spinner, |this| this.child(Spinner::new()))
     }
 
     fn render_eager_content(
@@ -784,6 +831,9 @@ mod tests {
 impl Render for TableView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.layer_names.is_empty() {
+            if self.loading {
+                return self.render_loading();
+            }
             #[cfg(target_os = "macos")]
             let shortcut_hint = "cmd+o";
             #[cfg(not(target_os = "macos"))]
@@ -844,20 +894,14 @@ impl Render for TableView {
                         }),
                 )
             })
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .size_full()
-                    .child(match self.loading_mode {
-                        LoadingMode::Eager => {
-                            self.render_eager_content(window, cx).into_any_element()
-                        }
-                        LoadingMode::Paged => {
-                            self.render_tab_content(window, cx).into_any_element()
-                        }
-                    }),
-            )
+            .child(div().flex_1().min_h_0().size_full().child(if self.loading {
+                self.render_loading().into_any_element()
+            } else {
+                match self.loading_mode {
+                    LoadingMode::Eager => self.render_eager_content(window, cx).into_any_element(),
+                    LoadingMode::Paged => self.render_tab_content(window, cx).into_any_element(),
+                }
+            }))
             .child(tab_bar)
             .child(
                 h_flex()
