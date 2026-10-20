@@ -906,6 +906,8 @@ impl Render for TableView {
             .child(
                 h_flex()
                     .id("table-status-bar")
+                    .w_full()
+                    .justify_end()
                     .flex_shrink_0()
                     .px_2()
                     .py_1()
