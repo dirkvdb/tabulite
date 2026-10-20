@@ -94,6 +94,15 @@ pub(crate) fn cell_filter_menu(
 }
 
 impl TableLayer {
+    pub fn clear(&mut self) {
+        // In-flight queries must not be able to restore the previous sheet.
+        *self = Self {
+            query_generation: self.query_generation + 1,
+            table_focus_handle: self.table_focus_handle.take(),
+            ..Self::default()
+        };
+    }
+
     pub fn update_data(&mut self, data: TableData, row_count: usize, first_page: TableRows) {
         let eager = data.loading_mode == LoadingMode::Eager;
         self.source = Some(data);
@@ -947,6 +956,45 @@ mod tests {
     use core::prelude::v1::test;
 
     #[test]
+    fn clearing_a_sheet_removes_content_and_invalidates_pending_queries() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/page-cache.csv");
+        let source = crate::tableio::layer_data(&path, "page-cache").unwrap();
+        let count = source.count(&[]).unwrap();
+        let page = source.query_page(&[], None, 0, PAGE_SIZE).unwrap();
+        let mut layer = TableLayer::default();
+        layer.update_data(source, count, page);
+        layer.pending_pages.insert(PAGE_SIZE);
+        layer.first_page_pending = true;
+        layer.visible_start = 10;
+        layer.visible_end = 20;
+        layer.filters.push((0, "row".into()));
+        layer.filter_enabled = true;
+        layer.any_filter_visible = true;
+        layer.sort = Some((0, false));
+        layer.selected_col = Some(1);
+        let generation = layer.generation();
+
+        layer.clear();
+
+        assert_eq!(layer.rows_count(), 0);
+        assert_eq!(layer.columns_count(), 0);
+        assert_eq!(layer.cell(0, 0), None);
+        assert!(layer.source.is_none());
+        assert!(layer.data.is_empty());
+        assert!(layer.pending_pages.is_empty());
+        assert!(!layer.first_page_pending);
+        assert_eq!(layer.visible_start..layer.visible_end, 0..0);
+        assert!(layer.filters.is_empty());
+        assert!(!layer.filters_visible());
+        assert!(!layer.any_filter_visible());
+        assert!(layer.sort.is_none());
+        assert!(layer.selected_col.is_none());
+        assert_eq!(layer.generation(), generation + 1);
+        layer.clear();
+        assert_eq!(layer.generation(), generation + 2);
+    }
+
+    #[test]
     fn keeps_only_a_bounded_page_of_a_large_file() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/page-cache.csv");
         let result = (|| -> anyhow::Result<()> {
@@ -972,6 +1020,46 @@ mod tests {
             Ok(())
         })();
         result.unwrap();
+    }
+
+    #[test]
+    fn keeps_large_xlsx_paged_after_type_fallback() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("testdata/paged-mixed-types.xlsx");
+        let source = crate::tableio::layer_data(&path, "Mixed types").unwrap();
+        assert_eq!(source.loading_mode, LoadingMode::Paged);
+        let count = source.count(&[]).unwrap();
+        let mut first_page = source.query_page(&[], None, 0, PAGE_SIZE + 1).unwrap();
+        assert_eq!(first_page.rows.len(), PAGE_SIZE + 1);
+        first_page.rows.truncate(PAGE_SIZE);
+        let mut layer = TableLayer::default();
+        layer.update_data(source.clone(), count, first_page);
+        assert_eq!(layer.rows_count(), 33_336);
+        assert_eq!(layer.data.len(), 1);
+        assert_eq!(layer.data[&0].len(), PAGE_SIZE);
+        assert_eq!(layer.cell(PAGE_SIZE, 0), None);
+
+        for offset in (0..count).step_by(PAGE_SIZE) {
+            let page = source.query_page(&[], None, offset, PAGE_SIZE).unwrap();
+            layer.visible_start = offset;
+            layer.visible_end = (offset + PAGE_SIZE).min(count);
+            layer.data.insert(offset, page.rows);
+            layer.evict_distant_pages();
+            assert!(layer.data.len() <= MAX_CACHED_PAGES);
+            assert!(
+                layer.data.values().map(Vec::len).sum::<usize>() <= MAX_CACHED_PAGES * PAGE_SIZE
+            );
+        }
+        assert_eq!(layer.cell(33_333, 0), Some(Some("DO001")));
+        assert_eq!(layer.cell(33_335, 0), Some(Some("00123")));
+        assert!(!layer.data.contains_key(&0));
+        assert_eq!(
+            source
+                .query_page(&[(0, "DO001".into())], None, 0, PAGE_SIZE)
+                .unwrap()
+                .rows,
+            vec![vec![Some("DO001".into()), Some("10".into())]]
+        );
     }
 
     #[test]

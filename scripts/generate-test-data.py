@@ -47,6 +47,18 @@ def write_xlsx(path):
     workbook.save(path)
 
 
+def write_mixed_xlsx(path, numeric_rows=1931):
+    workbook = Workbook(write_only=True)
+    sheet = workbook.create_sheet("Mixed types")
+    sheet.append(["code", "amount"])
+    for row in range(1, numeric_rows + 1):
+        sheet.append([row, row])
+    sheet.append(["DO001", 10])
+    sheet.append([None, 2])
+    sheet.append(["00123", None])
+    workbook.save(path)
+
+
 def write_sqlite_tables(path):
     with sqlite3.connect(path) as connection:
         connection.executescript('CREATE TABLE metadata (name TEXT, amount INTEGER); CREATE TABLE "tile""data" (zoom INTEGER, tile_data BLOB);')
@@ -103,6 +115,8 @@ def generate_test_fixtures():
     }.items():
         ensure(TESTDATA / filename, lambda path, text=text: write_text(path, text))
     ensure(TESTDATA / "multiple-sheets.xlsx", write_xlsx)
+    ensure(TESTDATA / "mixed-types.xlsx", write_mixed_xlsx)
+    ensure(TESTDATA / "paged-mixed-types.xlsx", lambda path: write_mixed_xlsx(path, 33_333))
     ensure(TESTDATA / "sqlite-tables.db", write_sqlite_tables)
     ensure(TESTDATA / "page-cache.csv", lambda path: write_rows(path, 1024))
     ensure(TESTDATA / "eager.csv", lambda path: write_rows(path, 300))

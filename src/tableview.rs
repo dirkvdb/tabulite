@@ -351,9 +351,24 @@ impl TableView {
         });
     }
 
+    fn clear_table_layer(&mut self, cx: &mut Context<Self>) {
+        self.loading_mode = LoadingMode::Paged;
+        self.eager_scroll = ScrollHandle::new();
+        self.table.update(cx, |table, cx| {
+            table.delegate_mut().clear();
+            table.sortable = false;
+            table.clear_selection(cx);
+            table.scroll_to_row(0, cx);
+            table.refresh(cx);
+            cx.notify();
+        });
+        cx.notify();
+    }
+
     pub(crate) fn load_table(&mut self, path: PathBuf, cx: &mut Context<Self>) -> Task<()> {
         self.file_generation += 1;
         self.layer_generation += 1;
+        self.clear_table_layer(cx);
         let generation = self.file_generation;
         cx.spawn(async move |this, cx| {
             let path_clone = path.clone();
@@ -397,6 +412,7 @@ impl TableView {
         cx: &mut Context<Self>,
     ) -> Task<()> {
         self.layer_generation += 1;
+        self.clear_table_layer(cx);
         let generation = self.layer_generation;
         cx.spawn(async move |this, cx| {
             let requested_path = path.clone();

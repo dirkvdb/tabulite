@@ -62,15 +62,6 @@ enum FileType {
     Sqlite,
 }
 
-impl FileType {
-    fn loading_mode(self) -> LoadingMode {
-        match self {
-            Self::Xlsx => LoadingMode::Eager,
-            Self::Csv | Self::Tsv | Self::Parquet | Self::Json | Self::Sqlite => LoadingMode::Paged,
-        }
-    }
-}
-
 fn file_type(path: &Path) -> Result<FileType> {
     let extension = path
         .extension()
@@ -175,7 +166,28 @@ pub fn layer_data(path: &Path, layer: &str) -> Result<TableData> {
             )
         }
     };
-    conn.execute_batch(&format!("CREATE VIEW data AS SELECT * FROM {source}"))?;
+    if file_type == FileType::Xlsx {
+        // Materialize XLSX once for efficient paging and to catch type errors
+        // in later rows before exposing the schema to the UI.
+        if let Err(error) =
+            conn.execute_batch(&format!("CREATE TABLE data AS SELECT * FROM {source}"))
+        {
+            if !error
+                .to_string()
+                .contains("read_xlsx: Failed to parse cell")
+            {
+                return Err(error.into());
+            }
+            log::warn!("XLSX type inference failed; reading sheet {layer:?} as text: {error}");
+            conn.execute_batch(&format!(
+                "CREATE TABLE data AS SELECT * FROM read_xlsx(\
+                 {source_path}, sheet = {}, header = true, all_varchar = true)",
+                sql_literal(layer)
+            ))?;
+        }
+    } else {
+        conn.execute_batch(&format!("CREATE VIEW data AS SELECT * FROM {source}"))?;
+    }
 
     let mut sqlite_types = Vec::new();
     let columns: Vec<TableColumn> = {
@@ -233,6 +245,19 @@ pub fn layer_data(path: &Path, layer: &str) -> Result<TableData> {
             })
             .collect()
     };
+    // The eager renderer creates elements for every cell, including row numbers.
+    // Large sheets must use the virtualized table and its bounded page cache.
+    const MAX_EAGER_CELLS: usize = 100_000;
+    let loading_mode = if file_type == FileType::Xlsx {
+        let count: i64 = conn.query_row("SELECT count(*) FROM data", [], |row| row.get(0))?;
+        if usize::try_from(count)?.saturating_mul(columns.len() + 1) <= MAX_EAGER_CELLS {
+            LoadingMode::Eager
+        } else {
+            LoadingMode::Paged
+        }
+    } else {
+        LoadingMode::Paged
+    };
     let blob_sizes = file_type == FileType::Sqlite
         && columns.iter().any(|column| column.kind == ColumnKind::Blob);
     if blob_sizes {
@@ -271,7 +296,7 @@ pub fn layer_data(path: &Path, layer: &str) -> Result<TableData> {
     Ok(TableData {
         connection: Arc::new(Mutex::new(conn)),
         columns,
-        loading_mode: file_type.loading_mode(),
+        loading_mode,
         blob_sizes,
         count_source: blob_sizes.then(|| format!("source.main.{}", quoted(layer))),
     })
@@ -629,6 +654,7 @@ mod tests {
         let sales = layer_data(&path, layers[0].as_ref()).unwrap();
         let other = layer_data(&path, layers[1].as_ref()).unwrap();
         assert_eq!(sales.loading_mode, LoadingMode::Eager);
+        assert_eq!(sales.columns[1].kind, ColumnKind::Float);
         assert_eq!(sales.query_all(&[], None).unwrap().rows.len(), 2);
         assert_eq!(
             sales
@@ -687,6 +713,31 @@ mod tests {
         assert_eq!(
             sales.query_page(&[], None, 1, 1).unwrap().rows[0][0].as_deref(),
             Some("Bob")
+        );
+    }
+
+    #[test]
+    fn reads_xlsx_with_text_late_in_a_numeric_column() {
+        let path = fixture_path("mixed-types.xlsx");
+        let data = layer_data(&path, "Mixed types").unwrap();
+        assert_eq!(data.loading_mode, LoadingMode::Eager);
+        assert_eq!(data.columns[0].name, "code");
+        assert_eq!(data.columns[0].kind, ColumnKind::Text);
+        assert_eq!(data.count(&[]).unwrap(), 1934);
+        let rows = data.query_all(&[], None).unwrap().rows;
+        assert_eq!(rows.len(), 1934);
+        assert_eq!(rows[0], vec![Some("1".into()), Some("1".into())]);
+        assert_eq!(
+            &rows[1931..],
+            &[
+                vec![Some("DO001".into()), Some("10".into())],
+                vec![None, Some("2".into())],
+                vec![Some("00123".into()), None],
+            ]
+        );
+        assert_eq!(
+            data.query_all(&[(0, "DO001".into())], None).unwrap().rows,
+            vec![vec![Some("DO001".into()), Some("10".into())]]
         );
     }
 
