@@ -4,12 +4,17 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     flake-utils.url = "github:numtide/flake-utils";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
     {
       nixpkgs,
       flake-utils,
+      rust-overlay,
       ...
     }:
     flake-utils.lib.eachDefaultSystem (
@@ -17,6 +22,12 @@
       let
         pkgs = import nixpkgs {
           inherit system;
+          overlays = [ rust-overlay.overlays.default ];
+        };
+        rustToolchain = pkgs.rust-bin.stable."1.98.1".default;
+        rustPlatform = pkgs.makeRustPlatform {
+          cargo = rustToolchain;
+          rustc = rustToolchain;
         };
         duckdb = import ./duckdb.nix { inherit pkgs; };
         linuxRuntimeDeps = with pkgs; [
@@ -37,7 +48,7 @@
       {
         packages = {
           # regular, host-native build (dynamic)
-          default = pkgs.rustPlatform.buildRustPackage {
+          default = rustPlatform.buildRustPackage {
             pname = "tabulite";
             version = "1.0.0";
 
@@ -58,7 +69,9 @@
             DUCKDB_INCLUDE_DIR = "${duckdb.dev}/include";
 
             preCheck = ''
-              ${pkgs.python3.withPackages (pythonPackages: [ pythonPackages.openpyxl ])}/bin/python3 scripts/generate-test-data.py
+              ${
+                pkgs.python3.withPackages (pythonPackages: [ pythonPackages.openpyxl ])
+              }/bin/python3 scripts/generate-test-data.py
             '';
 
             postFixup = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
